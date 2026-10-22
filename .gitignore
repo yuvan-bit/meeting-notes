@@ -1,0 +1,48 @@
+# Python
+/.venv/
+__pycache__/
+*.py[cod]
+/.pytest_cache/
+/pytest-of-*/
+
+# Local data, models and runtime state
+/data/
+/models/
+/gradio/
+/tmp*/
+/jieba.cache
+
+# Build outputs
+/build/
+/dist/
+*.apk
+*.aab
+/android/.gradle/
+/android/app/build/
+/android/build/
+/android/local.properties
+/android/.idea/
+
+# Logs
+*.log
+/.harness-*.log
+/.pywebview_install.log
+
+# Secrets and machine-specific files
+.env
+.env.*
+*.jks
+*.keystore
+local.properties
+
+# Internal notes, not part of the public repository
+/服务器对接笔记.md
+/deploy/tasks/
+/deploy/server-audit.md
+/deploy/deploy-report.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+/.idea/
+/.vscode/

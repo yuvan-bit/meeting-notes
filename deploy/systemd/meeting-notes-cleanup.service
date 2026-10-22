@@ -1,0 +1,17 @@
+[Unit]
+Description=Meeting Notes audio retention cleanup
+After=meeting-notes.service
+
+[Service]
+Type=oneshot
+User=meeting
+Group=meeting
+WorkingDirectory=/opt/meeting-notes
+EnvironmentFile=-/etc/meeting-notes.env
+ExecStart=/opt/meeting-notes/.venv/bin/python -m server.cli cleanup
+MemoryMax=120M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/meeting-notes
