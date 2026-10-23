@@ -185,6 +185,6 @@ pytest -q server/tests
 
 本项目以 [MIT License](LICENSE) 发布。第三方依赖与模型的许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-## 致谢
+## 鸣谢
 
-FunASR、ModelScope、Ollama、Gradio、pywebview、pystray 以及所有依赖项目的维护者。
+感谢 FunASR、ModelScope、Ollama、Qwen、Gradio、pywebview、pystray、FFmpeg、AndroidX / Jetpack Compose、Tailscale 等开源项目及其维护者。本项目的转写、摘要、界面与远程访问能力，都建立在这些工作之上。
