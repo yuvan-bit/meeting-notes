@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -8,6 +11,21 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 PYTHONW = BASE_DIR / ".venv" / "Scripts" / "pythonw.exe"
 ICON = BASE_DIR / "assets" / "app.ico"
+ICON_DIR = (
+    Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    / "MeetingNotes"
+)
+
+
+def stable_icon() -> Path:
+    # Explorer 无法解析含中文的快捷方式图标路径；按内容哈希放到纯英文目录，
+    # 文件名随图标内容变化，避免覆盖正被资源管理器占用的旧文件。
+    digest = hashlib.sha256(ICON.read_bytes()).hexdigest()[:12]
+    target = ICON_DIR / f"app-{digest}.ico"
+    if not target.is_file():
+        ICON_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ICON, target)
+    return target
 
 
 def main() -> int:
@@ -19,7 +37,7 @@ def main() -> int:
         return 1
     base = str(BASE_DIR).replace("'", "''")
     target = str(PYTHONW).replace("'", "''")
-    icon = str(ICON).replace("'", "''")
+    icon = str(stable_icon()).replace("'", "''")
     script = f"""
 $desktop = [Environment]::GetFolderPath('Desktop')
 $path = Join-Path $desktop '会议记录.lnk'

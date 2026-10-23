@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import ctypes
 import html
+import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -20,6 +22,8 @@ from . import config
 LOG_DIR = config.DATA_DIR / "logs"
 CLIENT_LOG = LOG_DIR / "client.log"
 WEBUI_LOG = LOG_DIR / "webui.log"
+RUN_DIR = config.DATA_DIR / "run"
+WORKBENCH_FILE = RUN_DIR / "workbench.json"
 ICON_PATH = config.BASE_DIR / "assets" / "app.ico"
 TRAY_MUTEX = "MeetingNotes.Local.Tray.Mutex"
 WINDOW_MUTEX = "MeetingNotes.Local.Window.Mutex"
@@ -149,6 +153,79 @@ def _stop_process(process: subprocess.Popen) -> None:
         process.wait(timeout=10)
     except subprocess.TimeoutExpired:
         process.kill()
+
+
+def _publish_workbench(url: str) -> None:
+    try:
+        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        WORKBENCH_FILE.write_text(
+            json.dumps({"pid": os.getpid(), "url": url}), encoding="utf-8"
+        )
+    except OSError as exc:
+        _log(f"写入工作台状态失败：{exc}")
+
+
+def _clear_workbench() -> None:
+    try:
+        data = json.loads(WORKBENCH_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if data.get("pid") != os.getpid():
+        return
+    try:
+        WORKBENCH_FILE.unlink()
+    except OSError:
+        pass
+
+
+def _running_workbench_url() -> str | None:
+    try:
+        data = json.loads(WORKBENCH_FILE.read_text(encoding="utf-8"))
+        url = str(data["url"])
+    except (OSError, ValueError, KeyError):
+        return None
+    try:
+        if requests.get(url, timeout=1.5).status_code == 200:
+            return url
+    except requests.RequestException:
+        pass
+    return None
+
+
+def _open_existing_workbench(url: str) -> bool:
+    found = _chromium_executable()
+    if found is not None:
+        name, executable = found
+        profile = RUN_DIR / "edge" / "reopen"
+        try:
+            profile.mkdir(parents=True, exist_ok=True)
+            subprocess.Popen(
+                [
+                    executable,
+                    f"--app={url}",
+                    f"--user-data-dir={profile}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-background-mode",
+                    "--disable-features=Translate,msEdgeTranslate,RendererAppContainer",
+                    "--window-size=1360,900",
+                ],
+                cwd=str(config.BASE_DIR),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            _log(f"已在运行的{name}应用窗口中重新打开工作台：{url}")
+            return True
+        except Exception as exc:
+            _log(f"重新打开应用窗口失败：{exc}")
+    try:
+        webbrowser.open(url)
+        _log(f"已用系统浏览器重新打开工作台：{url}")
+        return True
+    except Exception as exc:
+        _log(f"重新打开浏览器失败：{exc}")
+        return False
 
 
 def _start_server(port: int) -> subprocess.Popen:
@@ -296,15 +373,28 @@ def _chromium_executable() -> tuple[str, str] | None:
     return None
 
 
-def _run_app_window(url: str) -> bool:
+def _run_app_window(url: str, port: int, process: subprocess.Popen) -> bool:
     # Edge/Chrome 的 --app 模式没有地址栏，窗口关闭后浏览器进程会退出，
     # 可以可靠地停止本地 WebUI；比 pywebview 的 pythonnet 依赖更稳。
     found = _chromium_executable()
     if found is None:
         return False
+    try:
+        _wait_for_ui(port, process)
+    except Exception as exc:
+        _log(f"本地服务未就绪，无法打开应用窗口：{exc}")
+        return False
     name, executable = found
-    profile = config.DATA_DIR / f"{name.lower()}-app-profile"
-    profile.mkdir(parents=True, exist_ok=True)
+    # 本机 Edge 的 AppContainer 渲染沙箱在此启动方式下会创建失败，窗口只剩空白；
+    # 退回受限令牌沙箱后渲染正常。每次启动用独立配置目录，避免新窗口被转交给
+    # 已有实例后客户端误判窗口已关闭、停掉本地服务。
+    profile_root = RUN_DIR / "edge"
+    profile = profile_root / f"{name.lower()}-{os.getpid()}-{int(time.time())}"
+    try:
+        profile.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _log(f"创建{name}配置目录失败：{exc}")
+        return False
     args = [
         executable,
         f"--app={url}",
@@ -317,9 +407,9 @@ def _run_app_window(url: str) -> bool:
         "--disable-extensions",
         "--disable-sync",
         "--hide-crash-restore-bubble",
-        "--disable-features=Translate,msEdgeTranslate,msEdgeSidebarV2,"
-        "msEdgeCollections,msEdgeShoppingAssistant,msEdgeReadAloud,msEdgeAutofill,"
-        "msEdgeWebCapture",
+        "--disable-features=Translate,msEdgeTranslate,RendererAppContainer,"
+        "msEdgeSidebarV2,msEdgeCollections,msEdgeShoppingAssistant,msEdgeReadAloud,"
+        "msEdgeAutofill,msEdgeWebCapture",
         "--js-flags=--max-old-space-size=192",
         "--disk-cache-size=52428800",
         "--window-size=1360,900",
@@ -334,10 +424,21 @@ def _run_app_window(url: str) -> bool:
         )
     except Exception as exc:
         _log(f"启动{name}应用窗口失败：{exc}")
+        shutil.rmtree(profile, ignore_errors=True)
         return False
     _log(f"已打开{name}应用窗口：{url}")
+    started = time.time()
     process.wait()
+    if process.returncode not in (0, None) and time.time() - started < 5:
+        _log(f"{name}应用窗口启动失败（代码 {process.returncode}）")
+        shutil.rmtree(profile, ignore_errors=True)
+        return False
     _log("应用窗口已关闭")
+    for attempt in range(3):
+        shutil.rmtree(profile, ignore_errors=True)
+        if not profile.exists():
+            break
+        time.sleep(0.5)
     return True
 
 
@@ -389,13 +490,17 @@ def _open_folder(path: Path) -> None:
 
 def _window_main() -> int:
     if sys.platform.startswith("win") and _mutex_handle(WINDOW_MUTEX) is None:
-        _notify("会议记录工作台已经在运行。")
+        existing = _running_workbench_url()
+        if existing and _open_existing_workbench(existing):
+            return 0
+        _notify("会议记录工作台正在启动，请稍候。")
         return 0
     _log("=" * 60)
     _log("打开工作台窗口")
     port = _free_port()
     process = _start_server(port)
     url = f"http://127.0.0.1:{port}/"
+    _publish_workbench(url)
     try:
         try:
             import webview  # noqa: F401
@@ -410,12 +515,16 @@ def _window_main() -> int:
                 return 0
             except Exception as exc:
                 _log(f"原生桌面窗口不可用，改用应用窗口：{exc}")
-        if _run_app_window(url):
-            return 0
+        try:
+            if _run_app_window(url, port, process):
+                return 0
+        except Exception as exc:
+            _log(f"应用窗口启动失败，改用系统浏览器：{exc}")
         _run_browser(url, port, process)
         return 0
     finally:
         _stop_process(process)
+        _clear_workbench()
         log_handle = getattr(process, "_log_handle", None)
         if log_handle is not None:
             try:
@@ -465,11 +574,9 @@ def _tray_main(auto_open: bool = True) -> int:
             if running is not None and running.poll() is None:
                 return
             if sys.platform.startswith("win") and _mutex_active(WINDOW_MUTEX):
-                if icon is not None:
-                    try:
-                        icon.notify("工作台窗口已经在运行。", "会议记录")
-                    except Exception:
-                        pass
+                existing = _running_workbench_url()
+                if existing:
+                    _open_existing_workbench(existing)
                 return
             _log("从托盘打开工作台")
             try:
