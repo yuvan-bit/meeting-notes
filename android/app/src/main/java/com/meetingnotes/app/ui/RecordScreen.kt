@@ -24,6 +24,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -39,7 +41,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -58,7 +59,6 @@ import com.meetingnotes.app.recording.RecordingService
 import com.meetingnotes.app.upload.UploadScheduler
 import com.meetingnotes.app.util.formatBytes
 import com.meetingnotes.app.util.formatDuration
-import kotlinx.coroutines.delay
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -75,7 +75,6 @@ fun RecordScreen() {
     var title by rememberSaveable { mutableStateOf("") }
     var contentType by rememberSaveable { mutableStateOf("auto") }
     var notice by remember { mutableStateOf<String?>(null) }
-    var elapsedMs by remember { mutableLongStateOf(0L) }
 
     LaunchedEffect(recordingState.error) {
         val message = recordingState.error
@@ -84,14 +83,11 @@ fun RecordScreen() {
             container.recordingController.clearError()
         }
     }
-    LaunchedEffect(recordingState.active, recordingState.startedAtMs) {
-        if (!recordingState.active) {
-            elapsedMs = 0L
-            return@LaunchedEffect
-        }
-        while (true) {
-            elapsedMs = (System.currentTimeMillis() - recordingState.startedAtMs).coerceAtLeast(0)
-            delay(500)
+    LaunchedEffect(recordingState.notice) {
+        val message = recordingState.notice
+        if (!message.isNullOrBlank()) {
+            notice = message
+            container.recordingController.clearNotice()
         }
     }
 
@@ -249,17 +245,47 @@ fun RecordScreen() {
                             Spacer(Modifier.height(12.dp))
                             if (recordingState.active) {
                                 Text(
-                                    formatDuration(elapsedMs),
+                                    formatDuration(recordingState.elapsedMs),
                                     style = MaterialTheme.typography.headlineSmall,
                                     fontWeight = FontWeight.Bold,
                                 )
                                 Text(
-                                    "正在录音 · 已保存在本机",
+                                    if (recordingState.paused) {
+                                        "已暂停 · 音频仍保存在本机"
+                                    } else {
+                                        "正在录音 · 已保存在本机"
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
-                                TextButton(onClick = { RecordingService.cancel(context) }) {
-                                    Text("放弃本次录音", color = MaterialTheme.colorScheme.error)
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    TextButton(
+                                        onClick = {
+                                            if (recordingState.paused) {
+                                                RecordingService.resume(context)
+                                            } else {
+                                                RecordingService.pause(context)
+                                            }
+                                        }
+                                    ) {
+                                        Icon(
+                                            imageVector = if (recordingState.paused) {
+                                                Icons.Filled.PlayArrow
+                                            } else {
+                                                Icons.Filled.Pause
+                                            },
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                        Spacer(Modifier.size(4.dp))
+                                        Text(if (recordingState.paused) "继续录音" else "暂停录音")
+                                    }
+                                    TextButton(onClick = { RecordingService.cancel(context) }) {
+                                        Text("放弃本次录音", color = MaterialTheme.colorScheme.error)
+                                    }
                                 }
                             } else {
                                 Text(

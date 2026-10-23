@@ -34,6 +34,7 @@ __pycache__/
 *.jks
 *.keystore
 local.properties
+/android/keystore.properties
 
 # Internal notes, not part of the public repository
 /服务器对接笔记.md

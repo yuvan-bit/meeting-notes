@@ -61,7 +61,7 @@ class SettingsStore(context: Context) {
             var url = raw.trim()
             if (url.isEmpty()) return ""
             if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                url = "http://$url"
+                url = "https://$url"
             }
             return url.trimEnd('/')
         }

@@ -14,21 +14,25 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,14 +40,19 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.meetingnotes.app.BuildConfig
 import com.meetingnotes.app.MeetingApp
 import com.meetingnotes.app.data.MeResponse
+import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsScreen(onUnpaired: () -> Unit) {
     val context = LocalContext.current
     val container = (context.applicationContext as MeetingApp).container
+    val updateState by container.updates.state.collectAsState()
+    val scope = rememberCoroutineScope()
 
+    var installNotice by remember { mutableStateOf<String?>(null) }
     var me by remember { mutableStateOf<MeResponse?>(null) }
     var checking by remember { mutableStateOf(false) }
     var checkError by remember { mutableStateOf<String?>(null) }
@@ -161,6 +170,111 @@ fun SettingsScreen(onUnpaired: () -> Unit) {
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text("应用更新", style = MaterialTheme.typography.titleMedium)
+                    InfoRow(
+                        "当前版本",
+                        "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                    )
+                    val release = updateState.release
+                    when {
+                        updateState.downloading -> {
+                            Text(
+                                "正在下载 ${(updateState.progress * 100).toInt()}%",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            LinearProgressIndicator(
+                                progress = { updateState.progress },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+
+                        updateState.apk != null -> {
+                            Text(
+                                "版本 ${release?.versionName.orEmpty()} 已下载，可以安装。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Button(onClick = {
+                                installNotice = container.updates.install()
+                            }) {
+                                Text("安装更新")
+                            }
+                        }
+
+                        release != null -> {
+                            Text(
+                                "发现新版本 ${release.versionName} (${release.versionCode})",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            if (release.changelog.isNotBlank()) {
+                                Text(
+                                    release.changelog,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            OutlinedButton(
+                                enabled = !updateState.checking,
+                                onClick = {
+                                    installNotice = null
+                                    scope.launch { container.updates.download() }
+                                },
+                            ) {
+                                Text("下载更新")
+                            }
+                        }
+
+                        else -> {
+                            Text(
+                                when {
+                                    updateState.checking -> "正在检查更新…"
+                                    updateState.checked -> "已是最新版本"
+                                    else -> "启动时会自动检查更新"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    updateState.error?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    installNotice?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            enabled = !updateState.checking && !updateState.downloading,
+                            onClick = {
+                                installNotice = null
+                                scope.launch { container.updates.check() }
+                            },
+                        ) {
+                            Text("检查更新")
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text("工作方式", style = MaterialTheme.typography.titleMedium)
@@ -207,7 +321,7 @@ fun SettingsScreen(onUnpaired: () -> Unit) {
 
         item {
             Text(
-                "会议记录 · Android 0.1.0",
+                "会议记录 · Android ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp),

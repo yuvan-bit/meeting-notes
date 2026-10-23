@@ -9,12 +9,14 @@ import com.meetingnotes.app.data.ApiClient
 import com.meetingnotes.app.data.RecordingStore
 import com.meetingnotes.app.data.SettingsStore
 import com.meetingnotes.app.recording.RecordingController
+import com.meetingnotes.app.update.UpdateController
 
 class AppContainer(context: Context) {
     val settings = SettingsStore(context)
     val api = ApiClient(settings)
     val recordings = RecordingStore(context)
     val recordingController = RecordingController()
+    val updates = UpdateController(context, api, settings)
 }
 
 class MeetingApp : Application() {

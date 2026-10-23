@@ -45,6 +45,8 @@ PC 空闲代理（计划任务，每 2 分钟检查一次）
   audio/YYYY/MM/<recording_id>.m4a  # 原始音频
   notes/YYYY/MM/<job_id>/           # 笔记与转写稿
   tmp/<recording_id>/<chunk>.part   # 上传分片
+  app/latest.apk                    # 已发布的安卓安装包
+  app/latest.json                   # 版本、SHA-256、大小、更新说明
   .pairing_pepper                   # 配对码 pepper，600 权限
 ```
 
@@ -89,7 +91,7 @@ Restart=always
 
 ## 5. API v1
 
-所有业务接口前缀 `/api/v1`，除配对和健康检查外都需要
+所有业务接口前缀 `/api/v1`，除配对、健康检查和安卓更新清单/安装包下载外都需要
 `Authorization: Bearer <device_token>`。
 
 ### 认证
@@ -100,13 +102,25 @@ Restart=always
 | GET | `/me` | 当前设备信息 |
 | GET | `/health` | 无鉴权；返回版本、队列数、磁盘剩余，不含敏感信息 |
 
+### 应用更新
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/app/latest` | 无鉴权；版本号、SHA-256、大小、更新说明、apk_url；未发布返回 404 |
+| GET | `/app/apk` | 无鉴权；下载最新 APK，响应头含 X-APK-SHA256 |
+
+`python -m server.cli publish-apk` 把 APK 和元数据写入 `data/app/latest.apk` 与
+`latest.json`。客户端下载后会校验大小与 SHA-256，再交给 Android 系统安装器；
+不会静默安装。
+
 ### 手机端
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/recordings` | 初始化上传：title、content_type、filename、size、sha256 → recording_id、chunk_size、total_chunks |
 | PUT | `/recordings/{id}/chunks/{idx}` | 原始字节；`X-Chunk-SHA256` 可选；幂等 |
-| POST | `/recordings/{id}/complete` | 校验分片、合并音频、创建 job |
+| GET | `/recordings/{id}/chunks` | 返回已上传与缺失分片序号，供客户端续传 |
+| POST | `/recordings/{id}/complete` | 校验分片、合并音频、创建 job；重复调用返回同一 job |
 | GET | `/recordings` | 我的录音与任务状态 |
 | GET | `/recordings/{id}` | 单条状态、任务状态、note_id |
 | GET | `/recordings/{id}/audio` | 播放/下载；已清理返回 410 |

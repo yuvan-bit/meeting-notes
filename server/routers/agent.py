@@ -20,7 +20,7 @@ from ..storage import (
     extract_topic,
     notes_rel_dir,
 )
-from ..utils import iso, new_id, utcnow
+from ..utils import iso, new_id, parse_iso, utcnow
 from .common import get_recording
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -120,8 +120,8 @@ def heartbeat(
     with db:
         changed = db.execute(
             "UPDATE jobs SET lease_expires_at=?, last_heartbeat_at=? "
-            "WHERE id=? AND status='leased' AND lease_owner=?",
-            (expires, now, job_id, device["id"]),
+            "WHERE id=? AND status='leased' AND lease_owner=? AND lease_expires_at > ?",
+            (expires, now, job_id, device["id"], now),
         )
     if changed.rowcount != 1:
         raise HTTPException(status_code=409, detail="任务租约已失效")
@@ -176,6 +176,8 @@ async def upload_result(
 
     if job["status"] != "leased" or job["lease_owner"] != device["id"]:
         raise HTTPException(status_code=409, detail="任务租约不属于当前设备")
+    if job["lease_expires_at"] and parse_iso(job["lease_expires_at"]) <= utcnow():
+        raise HTTPException(status_code=409, detail="任务租约已过期")
 
     form = await request.form()
     uploads = form.getlist("files")
@@ -311,6 +313,8 @@ def fail_job(
         return {"job_id": job_id, "status": "done"}
     if job["status"] != "leased" or job["lease_owner"] != device["id"]:
         raise HTTPException(status_code=409, detail="任务租约不属于当前设备")
+    if job["lease_expires_at"] and parse_iso(job["lease_expires_at"]) <= utcnow():
+        raise HTTPException(status_code=409, detail="任务租约已过期")
 
     now = iso()
     failed = job["attempts"] >= settings.max_attempts

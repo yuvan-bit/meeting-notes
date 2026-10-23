@@ -14,8 +14,10 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import java.io.File
 import java.io.IOException
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -37,12 +39,16 @@ class ApiClient(private val settings: SettingsStore) {
         .retryOnConnectionFailure(true)
         .build()
 
+    private val downloadClient = client.newBuilder()
+        .readTimeout(300, TimeUnit.SECONDS)
+        .build()
+
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
     private val binaryMedia = "application/octet-stream".toMediaType()
 
     suspend fun pair(serverUrl: String, code: String, deviceName: String): PairResponse {
         val url = SettingsStore.normalizeUrl(serverUrl)
-        if (url.isEmpty()) throw ApiException("请填写服务器地址")
+        NetworkPolicy.validate(url)?.let { throw ApiException(it) }
         val payload = json.encodeToString(
             PairRequest(code = code.trim().uppercase(), deviceName = deviceName.trim())
         )
@@ -91,6 +97,9 @@ class ApiClient(private val settings: SettingsStore) {
         )
     }
 
+    suspend fun recordingChunks(recordingId: String): ChunkStatusResponse =
+        json.decodeFromString(request("/api/v1/recordings/$recordingId/chunks"))
+
     suspend fun uploadChunk(
         recordingId: String,
         index: Int,
@@ -98,7 +107,7 @@ class ApiClient(private val settings: SettingsStore) {
         sha256: String,
     ) {
         val request = Request.Builder()
-            .url("${settings.serverUrl}/api/v1/recordings/$recordingId/chunks/$index")
+            .url("${baseUrl()}/api/v1/recordings/$recordingId/chunks/$index")
             .header("Authorization", "Bearer ${settings.token}")
             .header("X-Chunk-SHA256", sha256)
             .put(data.toRequestBody(binaryMedia))
@@ -111,10 +120,105 @@ class ApiClient(private val settings: SettingsStore) {
         return json.decodeFromString(body)
     }
 
+    suspend fun latestApp(): AppRelease? {
+        val request = Request.Builder()
+            .url("${baseUrl()}/api/v1/app/latest")
+            .get()
+            .build()
+        return try {
+            json.decodeFromString(execute(request, authenticated = false))
+        } catch (e: ApiException) {
+            if (e.statusCode == 404) null else throw e
+        }
+    }
+
+    suspend fun downloadApk(
+        apkPath: String,
+        target: File,
+        expectedSha256: String,
+        expectedSize: Long,
+        onProgress: (Float) -> Unit,
+    ): File = withContext(Dispatchers.IO) {
+        val path = apkPath.trim()
+        if (!path.startsWith("/")) throw ApiException("更新地址无效", 400)
+        val request = Request.Builder().url(baseUrl() + path).get().build()
+        val response = try {
+            downloadClient.newCall(request).await()
+        } catch (e: IOException) {
+            throw ApiException("下载更新失败：${e.message ?: "网络错误"}")
+        }
+        if (!response.isSuccessful) {
+            val text = runCatching { response.body?.string().orEmpty() }.getOrDefault("")
+            response.close()
+            throw ApiException(parseError(text, response.code), response.code)
+        }
+        val parent = target.parentFile ?: throw ApiException("无法创建更新缓存目录")
+        parent.mkdirs()
+        val temp = File(parent, target.name + ".part")
+        try {
+            response.use { resp ->
+                val body = resp.body ?: throw ApiException("服务器未返回安装包")
+                val total = body.contentLength().takeIf { it > 0 } ?: expectedSize
+                body.byteStream().use { input ->
+                    temp.outputStream().use { output ->
+                        val buffer = ByteArray(256 * 1024)
+                        var copied = 0L
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            output.write(buffer, 0, read)
+                            copied += read
+                            if (total > 0) {
+                                onProgress((copied.toFloat() / total).coerceIn(0f, 1f))
+                            }
+                        }
+                    }
+                }
+            }
+            if (expectedSize > 0 && temp.length() != expectedSize) {
+                throw ApiException("安装包大小校验失败，请重新下载")
+            }
+            if (!sha256(temp).equals(expectedSha256.trim(), ignoreCase = true)) {
+                throw ApiException("安装包校验失败，请重新下载")
+            }
+            if (target.exists() && !target.delete()) {
+                throw ApiException("无法替换旧的安装包")
+            }
+            if (!temp.renameTo(target)) {
+                temp.copyTo(target, overwrite = true)
+                temp.delete()
+            }
+            onProgress(1f)
+            target
+        } catch (e: Exception) {
+            temp.delete()
+            throw e
+        }
+    }
+
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun baseUrl(): String {
+        val url = settings.serverUrl
+        NetworkPolicy.validate(url)?.let { throw ApiException(it, 400) }
+        return url
+    }
+
     private fun authorizedRequest(path: String, method: String): Request {
         if (!settings.isPaired) throw ApiException("尚未配对", 401)
         val builder = Request.Builder()
-            .url(settings.serverUrl + path)
+            .url(baseUrl() + path)
             .header("Authorization", "Bearer ${settings.token}")
         when (method) {
             "GET" -> builder.get()
@@ -130,7 +234,7 @@ class ApiClient(private val settings: SettingsStore) {
     ): String {
         if (!settings.isPaired) throw ApiException("尚未配对", 401)
         val builder = Request.Builder()
-            .url(settings.serverUrl + path)
+            .url(baseUrl() + path)
             .header("Authorization", "Bearer ${settings.token}")
         when {
             body != null -> builder.method(method, body.toRequestBody(jsonMedia))

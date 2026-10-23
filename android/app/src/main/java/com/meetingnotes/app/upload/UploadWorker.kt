@@ -10,6 +10,7 @@ import com.meetingnotes.app.data.ApiException
 import com.meetingnotes.app.data.RecordingCreateRequest
 import java.io.File
 import java.io.IOException
+import java.io.RandomAccessFile
 import java.security.MessageDigest
 
 class UploadWorker(
@@ -57,36 +58,43 @@ class UploadWorker(
             }
 
             val chunkSize = created.chunkSize.coerceAtLeast(1)
-            var index = 0
-            file.inputStream().use { input ->
-                val buffer = ByteArray(chunkSize)
-                while (index < created.totalChunks) {
-                    if (isStopped) return Result.retry()
-                    var filled = 0
-                    while (filled < chunkSize) {
-                        val read = input.read(buffer, filled, chunkSize - filled)
-                        if (read < 0) break
-                        filled += read
-                    }
-                    if (filled <= 0) break
-                    val chunk = if (filled == chunkSize) buffer.copyOf() else buffer.copyOf(filled)
-                    container.api.uploadChunk(
-                        recordingId = created.recordingId,
-                        index = index,
-                        data = chunk,
-                        sha256 = sha256(chunk),
-                    )
-                    index += 1
-                    setProgress(
-                        workDataOf(
-                            KEY_UPLOADED_CHUNKS to index,
-                            KEY_TOTAL_CHUNKS to created.totalChunks,
+            val status = container.api.recordingChunks(created.recordingId)
+            val uploaded = status.uploaded.toHashSet()
+            val missing = (0 until created.totalChunks).filter { it !in uploaded }
+            var done = uploaded.size
+            setProgress(
+                workDataOf(
+                    KEY_UPLOADED_CHUNKS to done,
+                    KEY_TOTAL_CHUNKS to created.totalChunks,
+                )
+            )
+            if (missing.isNotEmpty()) {
+                RandomAccessFile(file, "r").use { raf ->
+                    for (index in missing) {
+                        if (isStopped) return Result.retry()
+                        val offset = index.toLong() * chunkSize
+                        val length = minOf(chunkSize.toLong(), file.length() - offset).toInt()
+                        if (length <= 0) {
+                            throw ApiException("本地录音文件不完整，缺少第 ${index + 1} 段")
+                        }
+                        raf.seek(offset)
+                        val chunk = ByteArray(length)
+                        raf.readFully(chunk)
+                        container.api.uploadChunk(
+                            recordingId = created.recordingId,
+                            index = index,
+                            data = chunk,
+                            sha256 = sha256(chunk),
                         )
-                    )
+                        done += 1
+                        setProgress(
+                            workDataOf(
+                                KEY_UPLOADED_CHUNKS to done,
+                                KEY_TOTAL_CHUNKS to created.totalChunks,
+                            )
+                        )
+                    }
                 }
-            }
-            if (index != created.totalChunks) {
-                throw ApiException("本地文件读取提前结束")
             }
             val complete = container.api.completeRecording(created.recordingId)
             container.recordings.markUploaded(recordingId, created.recordingId, complete.jobId)

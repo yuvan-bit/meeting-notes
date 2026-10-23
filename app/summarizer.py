@@ -106,8 +106,8 @@ def resolve_speaker_names(
 ) -> dict[str, str]:
     names: dict[str, str] = {}
     for speaker in sorted({segment.speaker for segment in segments}):
-        match = re.search(r"\d+", speaker)
-        key = match.group() if match else speaker
+        match = re.fullmatch(r"(?:发言人)?(\d+)", speaker)
+        key = match.group(1) if match else speaker
         names[speaker] = mapping.get(key, speaker)
     return names
 

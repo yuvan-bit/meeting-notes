@@ -94,6 +94,27 @@ data class CompleteResponse(
 )
 
 @Serializable
+data class ChunkStatusResponse(
+    @SerialName("recording_id") val recordingId: String,
+    val status: String,
+    @SerialName("chunk_size") val chunkSize: Int,
+    @SerialName("total_chunks") val totalChunks: Int,
+    val uploaded: List<Int> = emptyList(),
+    val missing: List<Int> = emptyList(),
+)
+
+@Serializable
+data class AppRelease(
+    @SerialName("version_code") val versionCode: Int,
+    @SerialName("version_name") val versionName: String,
+    @SerialName("apk_url") val apkUrl: String,
+    val sha256: String,
+    @SerialName("size_bytes") val sizeBytes: Long,
+    val changelog: String = "",
+    @SerialName("published_at") val publishedAt: String = "",
+)
+
+@Serializable
 data class PairRequest(
     val code: String,
     @SerialName("device_name") val deviceName: String,

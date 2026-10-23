@@ -6,7 +6,7 @@ from fastapi import FastAPI
 
 from .config import Settings
 from .db import init_db
-from .routers import agent, auth, health, notes, recordings
+from .routers import agent, app_update, auth, health, notes, recordings
 from .security import AttemptLimiter
 
 
@@ -34,6 +34,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(recordings.router, prefix="/api/v1")
     app.include_router(agent.router, prefix="/api/v1")
     app.include_router(notes.router, prefix="/api/v1")
+    app.include_router(app_update.router, prefix="/api/v1")
 
     @app.get("/")
     def root():

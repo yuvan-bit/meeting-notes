@@ -6,13 +6,13 @@
 
 ## 功能
 
-- **本地转写**：支持常见音频/视频文件，自动转成 16kHz WAV 后送入 FunASR。
+- **本地转写**：支持常见音频/视频文件，自动转成 16kHz WAV 后送入 FunASR；超过 30 分钟的长录音按停顿自动分段、逐段识别后合并时间轴。
 - **会议 / 课程**：自动判断内容类型，分别生成会议纪要和课程笔记。
-- **说话人分离**：cam++ 声纹聚类，可在生成前手工映射 `0=张三,1=李四`。
+- **说话人分离**：cam++ 声纹聚类，可在生成前手工映射 `0=张三,1=李四`；长录音分段转写时发言人按段独立编号。
 - **分类归档**：按 `年/月/日期_类型_主题` 写入资料库，同时生成 Markdown 纪要、逐字稿和元数据。
 - **本机工作台**：Gradio 界面浏览资料库、上传处理、查看进度。
 - **托盘客户端**：常驻内存约 40MB；关闭工作台窗口即释放 WebUI 与浏览器窗口，再次启动只重开窗口。
-- **安卓 App**：录音/暂停/续录、断点分片上传、笔记列表与搜索、Markdown 预览、附件下载。
+- **安卓 App**：录音/暂停/续录、断点分片上传、笔记列表与搜索、Markdown 预览、附件下载、应用内检查更新。
 - **空闲代理**：Windows 计划任务每 2 分钟检查一次；空闲满 10 分钟、接电源、CPU/GPU 低负载时才领取任务，不常驻轮询。
 - **保留策略**：服务器音频最多 5GB、最多 30 天；笔记和转写稿永久保留，置顶记录不自动清理。
 
@@ -146,12 +146,42 @@ powershell -ExecutionPolicy Bypass -File tools\install_agent_task.ps1 -Uninstall
 
 ### 4. 安装手机 App
 
+开发调试：
+
 ```bash
 cd android
 ./gradlew assembleDebug
 ```
 
 APK 位于 `android/app/build/outputs/apk/debug/app-debug.apk`。安装后在 App 内填写服务器地址和 `pair-code --role phone` 生成的一次性配对码。
+
+正式使用需要固定签名，才能让后续版本覆盖安装：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\setup_android_signing.ps1
+```
+
+脚本会交互式询问签名密码，生成 `android/keystore/release.jks` 和 `android/keystore.properties`；两者都已排除在 Git 之外。请离线备份 keystore 和密码，丢失后将无法覆盖安装后续版本。
+
+```bash
+cd android
+./gradlew assembleRelease
+```
+
+APK 位于 `android/app/build/outputs/apk/release/app-release.apk`。首次从旧的 debug 签名包切换到正式签名包时，Android 会拒绝覆盖安装；请先上传未同步的录音，卸载旧版后手动安装一次。此后 App 启动时会自动检查新版本，也可以到“设置 → 应用更新”手动检查、下载并调起系统安装器。系统会要求允许“安装未知应用”，不会静默安装。
+
+正式版只接受 HTTPS 服务器地址；服务器地址未写协议时默认补全 `https://`。调试构建允许显式填写 `http://` 以便本机联调，配对页会显示明文传输警告。不要在日常使用的手机上通过公网明文 HTTP 传输设备令牌和录音。
+
+### 5. 发布安卓更新
+
+递增 `android/app/build.gradle.kts` 中的 `versionCode`，构建 release APK，然后把 APK 传到服务器并发布：
+
+```bash
+sudo -u meeting .venv/bin/python -m server.cli publish-apk /path/meeting-notes.apk \
+  --version-code 3 --version-name 0.2.1 --changelog "修复若干问题"
+```
+
+发布内容写入 `/var/lib/meeting-notes/app/latest.json` 和 `latest.apk`。App 通过 `GET /api/v1/app/latest` 检查版本，下载后校验 SHA-256 与文件大小，再交给系统安装器。更新接口不需要设备令牌，因此只能通过 Tailscale 暴露，不要直接开到公网。
 
 ## 配置
 
@@ -160,6 +190,10 @@ APK 位于 `android/app/build/outputs/apk/debug/app-debug.apk`。安装后在 Ap
 | `MEETING_LLM` | `qwen3.5:9b` | 摘要模型 |
 | `MEETING_LLM_FAST` | `qwen3.5:4b` | 快速模型 |
 | `MEETING_ASR_DEVICE` | `auto` | `auto` / `cuda` / `cpu` |
+| `MEETING_ASR_CHUNK_THRESHOLD_S` | `1800` | 超过该时长的音频自动分段转写 |
+| `MEETING_ASR_CHUNK_TARGET_S` | `900` | 每段的目标时长（秒） |
+| `MEETING_ASR_CHUNK_MIN_S` | `300` | 每段最短时长（秒） |
+| `MEETING_ASR_CHUNK_MAX_S` | `1200` | 每段最长时长（秒） |
 | `MEETING_CHUNK_CHARS` | `4000` | 长转写分段摘要的字符阈值 |
 | `MEETING_NUM_CTX` | `8192` | Ollama 上下文长度 |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama 地址 |
@@ -170,7 +204,7 @@ APK 位于 `android/app/build/outputs/apk/debug/app-debug.apk`。安装后在 Ap
 
 ```bash
 pip install -r server/requirements-dev.txt
-pytest -q server/tests
+pytest -q server/tests tests
 ```
 
 ## 数据与隐私

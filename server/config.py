@@ -46,6 +46,10 @@ class Settings:
     docs_enabled: bool = False
     version: str = "0.1.0"
 
+    @property
+    def app_dir(self) -> Path:
+        return self.data_dir / "app"
+
     @classmethod
     def create(cls, data_dir: str | Path, **overrides) -> "Settings":
         root = Path(data_dir).expanduser().resolve()
@@ -95,7 +99,7 @@ class Settings:
         return settings
 
     def ensure_dirs(self) -> None:
-        for path in (self.data_dir, self.audio_dir, self.notes_dir, self.tmp_dir):
+        for path in (self.data_dir, self.audio_dir, self.notes_dir, self.tmp_dir, self.app_dir):
             path.mkdir(parents=True, exist_ok=True)
         try:
             self.data_dir.chmod(0o700)

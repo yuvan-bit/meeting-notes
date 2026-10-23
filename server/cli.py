@@ -4,6 +4,7 @@ import argparse
 import json
 import shutil
 
+from .app_update import ReleaseError, publish_apk
 from .cleanup import cleanup
 from .config import Settings
 from .db import connect, init_db
@@ -90,6 +91,22 @@ def _list_devices(settings: Settings) -> int:
     return 0
 
 
+def _publish_apk(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        meta = publish_apk(
+            settings,
+            args.apk,
+            args.version_code,
+            args.version_name,
+            args.changelog,
+        )
+    except ReleaseError as exc:
+        print(f"发布失败：{exc}")
+        return 1
+    print(json.dumps(meta, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _revoke(settings: Settings, device_id: str) -> int:
     conn = connect(settings.db_path)
     try:
@@ -113,6 +130,11 @@ def main() -> int:
     sub.add_parser("list-devices", help="列出设备")
     revoke = sub.add_parser("revoke-device", help="撤销设备令牌")
     revoke.add_argument("device_id")
+    publish = sub.add_parser("publish-apk", help="发布安卓安装包供客户端更新")
+    publish.add_argument("apk")
+    publish.add_argument("--version-code", type=int, required=True)
+    publish.add_argument("--version-name", required=True)
+    publish.add_argument("--changelog", default="")
 
     args = parser.parse_args()
     settings = _settings()
@@ -129,6 +151,8 @@ def main() -> int:
         return _list_devices(settings)
     if args.command == "revoke-device":
         return _revoke(settings, args.device_id)
+    if args.command == "publish-apk":
+        return _publish_apk(settings, args)
     parser.error("未知命令")
     return 2
 

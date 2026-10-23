@@ -88,6 +88,31 @@ def create_recording(
     }
 
 
+@router.get("/recordings/{recording_id}/chunks")
+def recording_chunks(
+    recording_id: str,
+    device: dict = Depends(require_phone),
+    db: sqlite3.Connection = Depends(get_db),
+):
+    recording = get_recording(db, recording_id, device["id"])
+    uploaded = [
+        row["idx"]
+        for row in db.execute(
+            "SELECT idx FROM recording_chunks WHERE recording_id=? ORDER BY idx",
+            (recording_id,),
+        ).fetchall()
+    ]
+    missing = sorted(set(range(recording["total_chunks"])) - set(uploaded))
+    return {
+        "recording_id": recording_id,
+        "status": recording["status"],
+        "chunk_size": recording["chunk_size"],
+        "total_chunks": recording["total_chunks"],
+        "uploaded": uploaded,
+        "missing": missing,
+    }
+
+
 @router.put("/recordings/{recording_id}/chunks/{idx}")
 async def upload_chunk(
     recording_id: str,
@@ -127,6 +152,10 @@ async def upload_chunk(
             raise HTTPException(status_code=400, detail="Content-Length 无效")
         if declared > settings.max_chunk_bytes or declared > recording["chunk_size"]:
             raise HTTPException(status_code=413, detail="分片过大")
+
+    free = shutil.disk_usage(settings.tmp_dir).free
+    if free < recording["chunk_size"] + 64 * 1024 * 1024:
+        raise HTTPException(status_code=507, detail="服务器磁盘空间不足")
 
     chunk_dir = settings.tmp_dir / recording_id
     chunk_dir.mkdir(parents=True, exist_ok=True)
@@ -215,6 +244,10 @@ def complete_recording(
     total_size = sum(row["size_bytes"] for row in chunks)
     if total_size != recording["size_bytes"]:
         raise HTTPException(status_code=400, detail="分片总大小与声明不一致")
+
+    free = shutil.disk_usage(settings.tmp_dir).free
+    if free < recording["size_bytes"] + 64 * 1024 * 1024:
+        raise HTTPException(status_code=507, detail="服务器磁盘空间不足")
 
     suffix = audio_suffix(recording["original_filename"])
     rel_path = audio_rel_path(parse_iso(recording["created_at"]), recording_id, suffix)

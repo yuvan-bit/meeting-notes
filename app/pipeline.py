@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from typing import Callable
 
 from . import config
 from .audio import convert_to_wav, format_ts, probe_duration, safe_stem
+from .asr_chunking import AudioChunk, detect_silences, plan_boundaries, split_wav
 from .locks import processing_lock
 from .library import (
     create_entry_dir,
@@ -49,6 +51,7 @@ class JobResult:
     output_dir: str
     content_type: str = "meeting"
     content_type_label: str = "会议"
+    asr_chunks: int = 1
     topic: str = ""
     summary: str = ""
     created_at: str = ""
@@ -72,12 +75,20 @@ def _transcript_markdown(
         f"- 时长：{format_ts(result.duration_s * 1000)}",
         f"- 转写设备：{result.asr_device}",
         f"- 说话人：{'、'.join(dict.fromkeys(names.values()))}",
-        "",
-        "> 发言人编号由声纹聚类自动生成，跨会议不具可比性；建议按会前报名字人工核对。",
-        "",
-        "## 逐字稿",
-        "",
     ]
+    if result.asr_chunks > 1:
+        lines.append(
+            f"- 分段：{result.asr_chunks} 段（长音频按停顿自动切分，发言人编号按段独立）"
+        )
+    lines.extend(
+        [
+            "",
+            "> 发言人编号由声纹聚类自动生成，跨会议不具可比性；建议按会前报名字人工核对。",
+            "",
+            "## 逐字稿",
+            "",
+        ]
+    )
     current_speaker = None
     buffer: list[str] = []
     start_ms = 0
@@ -126,7 +137,8 @@ def _transcribe_in_worker(
     asr_device: str,
     work_dir: Path,
     report: ProgressFn,
-) -> tuple[list[Segment], str]:
+    chunks: list[AudioChunk] | None = None,
+) -> tuple[list[Segment], str, int]:
     # ASR 放在子进程里跑：进程退出后 CUDA 显存才会完整归还给 Ollama
     output_path = work_dir / "segments.json"
     log_path = work_dir / "asr.log"
@@ -134,8 +146,6 @@ def _transcribe_in_worker(
         sys.executable,
         "-m",
         "app.asr_worker",
-        "--input",
-        str(wav_path),
         "--output",
         str(output_path),
         "--hotwords",
@@ -143,6 +153,28 @@ def _transcribe_in_worker(
         "--device",
         asr_device,
     ]
+    if chunks:
+        manifest_path = work_dir / "chunks.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "chunks": [
+                        {
+                            "index": chunk.index,
+                            "path": str(chunk.path),
+                            "offset_ms": chunk.offset_ms,
+                        }
+                        for chunk in chunks
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        command.extend(["--manifest", str(manifest_path)])
+    else:
+        command.extend(["--input", str(wav_path)])
+
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
@@ -162,7 +194,13 @@ def _transcribe_in_worker(
         for line in process.stdout:
             message = line.strip()
             if message:
-                report(0.12, message)
+                match = re.match(r"\[(\d+)/(\d+)\]", message)
+                if match:
+                    total = max(1, int(match.group(2)))
+                    done = min(total, int(match.group(1)))
+                    report(0.12 + 0.5 * (done - 1) / total, message)
+                else:
+                    report(0.12, message)
         returncode = process.wait()
 
     if returncode != 0 or not output_path.exists():
@@ -174,7 +212,30 @@ def _transcribe_in_worker(
     segments = [Segment(**item) for item in payload.get("segments", [])]
     if not segments:
         raise TranscriptionError("没有识别到任何语音内容。")
-    return segments, payload.get("device") or asr_device
+    chunk_count = int(payload.get("chunks") or 1)
+    return segments, payload.get("device") or asr_device, chunk_count
+
+
+def _prepare_chunks(
+    wav_path: Path,
+    duration_s: float,
+    work_dir: Path,
+    report: ProgressFn,
+) -> list[AudioChunk] | None:
+    report(0.1, "音频较长，正在按停顿位置规划分段…")
+    silences = detect_silences(wav_path)
+    boundaries = plan_boundaries(
+        duration_s,
+        silences,
+        target_s=config.ASR_CHUNK_TARGET_S,
+        min_chunk_s=config.ASR_CHUNK_MIN_S,
+        max_chunk_s=config.ASR_CHUNK_MAX_S,
+    )
+    if not boundaries:
+        return None
+    chunks = split_wav(wav_path, boundaries, work_dir / "chunks", duration_s)
+    report(0.11, f"已切分为 {len(chunks)} 段，将逐段转写…")
+    return chunks
 
 
 def _library_topic(minutes: str, content_type: str, fallback: str) -> str:
@@ -253,10 +314,31 @@ def _run_pipeline(
         convert_to_wav(source, wav_path)
 
         report(0.12, "加载 FunASR 模型…")
-        segments, device = _transcribe_in_worker(
-            wav_path, hotwords, asr_device, work_dir, report
-        )
-        report(0.62, f"转写完成（{device}）")
+        chunks: list[AudioChunk] | None = None
+        if duration_s > config.ASR_CHUNK_THRESHOLD_S:
+            chunks = _prepare_chunks(wav_path, duration_s, work_dir, report)
+        try:
+            segments, device, asr_chunks = _transcribe_in_worker(
+                wav_path, hotwords, asr_device, work_dir, report, chunks
+            )
+        except TranscriptionError:
+            retry_threshold = config.ASR_CHUNK_TARGET_S * 1.5
+            if chunks is None and duration_s > retry_threshold:
+                report(0.12, "整段转写未成功，改为分段重试…")
+                chunks = _prepare_chunks(wav_path, duration_s, work_dir, report)
+                if chunks is None:
+                    raise
+                segments, device, asr_chunks = _transcribe_in_worker(
+                    wav_path, hotwords, asr_device, work_dir, report, chunks
+                )
+            else:
+                raise
+        if asr_chunks > 1:
+            warnings.append(
+                f"音频较长，已自动分为 {asr_chunks} 段转写；发言人编号按段独立，"
+                "跨段同一说话人可能显示为不同编号。"
+            )
+        report(0.62, f"转写完成（{device}，{asr_chunks} 段）")
 
         mapping = parse_speaker_map(speaker_map_text)
         names = resolve_speaker_names(segments, mapping)
@@ -279,6 +361,7 @@ def _run_pipeline(
             output_dir=str(work_dir),
             content_type=resolved_type,
             content_type_label=kind_label,
+            asr_chunks=asr_chunks,
             warnings=warnings,
         )
 
@@ -381,6 +464,7 @@ def _run_pipeline(
                     "source": source.name,
                     "duration_s": result.duration_s,
                     "segments": len(segments),
+                    "asr_chunks": result.asr_chunks,
                     "asr_device": device,
                     "summary_model": meta.model,
                     "summary_num_gpu": meta.num_gpu,

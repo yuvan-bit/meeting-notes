@@ -35,6 +35,12 @@ PUNC_MODEL = os.environ.get("MEETING_PUNC_MODEL", "ct-punc")
 SPK_MODEL = os.environ.get("MEETING_SPK_MODEL", "cam++")
 ASR_DEVICE = os.environ.get("MEETING_ASR_DEVICE", "auto").lower()
 
+# 超过阈值的长音频按停顿位置自动切段，避免单次加载过大。
+ASR_CHUNK_THRESHOLD_S = int(os.environ.get("MEETING_ASR_CHUNK_THRESHOLD_S", "1800"))
+ASR_CHUNK_TARGET_S = int(os.environ.get("MEETING_ASR_CHUNK_TARGET_S", "900"))
+ASR_CHUNK_MIN_S = int(os.environ.get("MEETING_ASR_CHUNK_MIN_S", "300"))
+ASR_CHUNK_MAX_S = int(os.environ.get("MEETING_ASR_CHUNK_MAX_S", "1200"))
+
 MAX_CHARS_PER_CHUNK = int(os.environ.get("MEETING_CHUNK_CHARS", "4000"))
 SUMMARY_NUM_CTX = int(os.environ.get("MEETING_NUM_CTX", "8192"))
 LLM_KEEP_ALIVE = os.environ.get("MEETING_LLM_KEEP_ALIVE", "10m")

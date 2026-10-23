@@ -41,6 +41,8 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import com.meetingnotes.app.MeetingApp
+import com.meetingnotes.app.data.NetworkPolicy
+import com.meetingnotes.app.data.SettingsStore
 import kotlinx.coroutines.launch
 
 @Composable
@@ -59,11 +61,21 @@ fun PairingScreen(
     }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    val insecureWarning = if (serverUrl.isBlank()) {
+        null
+    } else {
+        NetworkPolicy.pairingWarning(SettingsStore.normalizeUrl(serverUrl))
+    }
 
     fun submit() {
         if (loading) return
         if (serverUrl.isBlank() || code.isBlank() || deviceName.isBlank()) {
             error = "请填写服务器地址、配对码和设备名称"
+            return
+        }
+        val policyError = NetworkPolicy.validate(SettingsStore.normalizeUrl(serverUrl))
+        if (policyError != null) {
+            error = policyError
             return
         }
         loading = true
@@ -163,6 +175,20 @@ fun PairingScreen(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                if (insecureWarning != null) {
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer
+                        )
+                    ) {
+                        Text(
+                            insecureWarning,
+                            modifier = Modifier.padding(12.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                    }
+                }
                 if (error != null) {
                     Text(
                         error.orEmpty(),
