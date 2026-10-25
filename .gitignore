@@ -42,6 +42,9 @@ local.properties
 /deploy/server-audit.md
 /deploy/deploy-report.md
 
+# Promo video workspace (large local media, not part of the app)
+/promo/
+
 # OS / editor
 .DS_Store
 Thumbs.db

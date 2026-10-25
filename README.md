@@ -12,7 +12,7 @@
 - **分类归档**：按 `年/月/日期_类型_主题` 写入资料库，同时生成 Markdown 纪要、逐字稿和元数据。
 - **本机工作台**：Gradio 界面浏览资料库、上传处理、查看进度。
 - **托盘客户端**：常驻内存约 40MB；关闭工作台窗口即释放 WebUI 与浏览器窗口，再次启动只重开窗口。
-- **安卓 App**：录音/暂停/续录、断点分片上传、笔记列表与搜索、Markdown 预览、附件下载、应用内检查更新。
+- **安卓 App**：录音/暂停/续录、前台上传与并发分片断点续传、笔记本地缓存秒开、笔记列表与搜索、Markdown 预览、附件下载、应用内检查更新。
 - **空闲代理**：Windows 计划任务每 2 分钟检查一次；空闲满 10 分钟、接电源、CPU/GPU 低负载时才领取任务，不常驻轮询。
 - **保留策略**：服务器音频最多 5GB、最多 30 天；笔记和转写稿永久保留，置顶记录不自动清理。
 
@@ -124,6 +124,15 @@ curl https://meeting-server.<tailnet>.ts.net/health
 
 服务仍然只监听回环地址，Tailscale Serve 只把 443 映射到本机 8000，不暴露公网。
 
+如果笔记和大文件加载偏慢，通常是 Tailscale 走了 DERP 中继。可在云服务器安全组和 UFW 同时放行 **UDP 41641**，让客户端与服务器建立直连：
+
+```bash
+sudo ufw allow 41641/udp comment 'tailscale direct'
+tailscale ping <服务器主机名>   # 出现 direct 即已直连
+```
+
+该端口只承载 Tailscale 的 WireGuard 加密流量，不会把 FastAPI 暴露到公网。
+
 ### 3. 配对 PC
 
 ```bash
@@ -143,6 +152,14 @@ powershell -ExecutionPolicy Bypass -File tools\install_agent_task.ps1
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\install_agent_task.ps1 -Uninstall
 ```
+
+本机直接处理的录音不会经过服务器队列。要把这类历史纪要补到手机端，在资料库选中记录后点「同步到手机」，或使用命令行：
+
+```powershell
+.venv\Scripts\python.exe -m app.cloud_agent push "data\library\2026\10\<条目目录>"
+```
+
+同步以 `设备 + 本地 job_id` 去重，重复执行只会刷新内容，不会在手机上产生副本。只上传纪要与逐字稿，不上传音频和本机路径信息。
 
 ### 4. 安装手机 App
 
@@ -206,6 +223,10 @@ sudo -u meeting .venv/bin/python -m server.cli publish-apk /path/meeting-notes.a
 pip install -r server/requirements-dev.txt
 pytest -q server/tests tests
 ```
+
+## 交接
+
+当前部署状态、未提交改动、已知问题和待办事项见 [HANDOFF.md](HANDOFF.md)。
 
 ## 数据与隐私
 
