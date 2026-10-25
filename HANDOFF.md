@@ -28,6 +28,7 @@
 
 - 服务：`meeting-notes.service`（`/opt/meeting-notes`），数据目录 `/var/lib/meeting-notes`。
 - 对外访问：Tailscale Serve 把 443 转发到 `127.0.0.1:8000`；FastAPI 本身不监听公网。
+- Tailscale 直连已建立（2026-10-26）：安全组新增 UDP 41641，PC 和手机均已走 `direct`。
 - 同机共存：Koishi、NapCat。**不要改动这两个服务**，也不要动无关端口。
 - 服务器健康检查当时返回：4 条笔记、1 个排队任务、4 个服务全部 active。
 - 服务器版本字段仍为 `0.1.0`，与 Android 版本号无关。
@@ -124,19 +125,17 @@ Android 录音 ──分片上传──▶ FastAPI 控制面（SQLite + 文件�
 
 背景：PC 和手机到服务器都在走 DERP 中继，实测单连接约 58–84 KiB/s，笔记加载和更新下载都慢。
 
-已完成：
+已完成（2026-10-26）：
 
 - 服务器 UFW 已放行 `41641/udp`（IPv4 + IPv6），tailscaled 正在监听该端口。
-- 已核验 `meeting-notes`、`koishi`、`napcat`、`tailscaled` 均正常。
+- 阿里云安全组已加入方向规则：自定义 UDP，`41641/41641`，来源 `0.0.0.0/0`，描述 `Tailscale WireGuard direct`。
+- 直连已建立：PC 和手机 `tailscale ping` 均显示 `direct`，RTT 约 **53ms**（之前 180–740ms）。
+- PC → 服务器下载 2MiB 用 2.3 秒，约 **885 KiB/s ≈ 7.25 Mbps**（之前约 102 KiB/s）。
+- 笔记列表接口降到 **0.08–0.21 秒**（之前 0.3–0.8 秒）。
+- 控制台显示公网带宽峰值为 **5 Mbps**（按流量计费）；大文件下载仍受这个出网峰值影响，手机上传走入口带宽，通常会更高。
+- 手机直连已建立；实际上传速度待下一次录音上传时用服务器分片时间戳确认。
 
-**未完成**：阿里云安全组仍然只放行 22，`tailscale ping` 仍显示 `via DERP(hkg)`、`direct connection not established`。需要在控制台为实例安全组加入方向规则：
-
-- 协议：自定义 UDP
-- 端口：`41641/41641`
-- 来源：`0.0.0.0/0`
-- 说明：Tailscale direct
-
-放行后无需重启。用 `tailscale ping <服务器主机名>` 看到 `direct` 即成功；如果手机仍走中继，在手机上开关一次 Tailscale 强制重新握手。
+无需重启 Tailscale。若某台设备又回到 DERP，在该设备上开关一次 Tailscale 触发重新握手。
 
 ### 5.4 宣传片
 
@@ -230,6 +229,8 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
    - `NotesScreen.kt`、`NoteDetailScreen.kt`、`RecordScreen.kt`、`PairingScreen.kt`、`SettingsScreen.kt`
 3. **`docs: add handoff notes and ignore promo workspace`**
    - `README.md`、`HANDOFF.md`、`.gitignore`
+4. **`docs: record Tailscale direct connection`**
+   - `HANDOFF.md`（直连验证与实测速率）
 
 **不要提交**：
 
@@ -238,7 +239,7 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 
 ## 8. 待办与下一步
 
-1. **打开安全组 UDP 41641**，然后验证 `tailscale ping` 为 `direct`，并复测笔记接口和大文件下载速度。
+1. **直连已完成**（UDP 41641，PC/手机均 direct）；下次手机上传时确认实际分片速率，并继续观察隧道是否保持在 direct。
 2. 在手机上安装 0.2.2，确认：
    - 笔记列表 / 详情第二次打开是秒显；
    - 断网或 Tailscale 未连时仍能看到缓存，详情页会显示「上次缓存」提示；
@@ -249,7 +250,8 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 
 ## 9. 约束与安全注意事项
 
-- **共享服务器**：同机跑着 Koishi / NapCat。除 2026-10-25 经用户同意新增的 `41641/udp` 外，不要改动 UFW 规则、其他 systemd 单元或端口。
+- **共享服务器**：同机跑着 Koishi / NapCat。除 2026-10-25 经用户同意新增的 UFW `41641/udp`、以及 2026-10-26 经用户同意新增的安全组 UDP 41641 外，不要改动 UFW、安全组、其他 systemd 单元或端口。
+- **安全组现状**：除 UDP 41641 外，还有系统创建的全量 ICMP、SSH 22、RDP 3389 入方向规则。Linux 上未监听 RDP，但 3389 对 `0.0.0.0/0` 开放并不必要，建议后续单独确认是否删除；不要顺手改动。
 - **公网暴露**：FastAPI 仍只监听回环，通过 Tailscale Serve 提供 HTTPS。UDP 41641 只承载 WireGuard，不直接暴露 HTTP。
 - **密钥边界**：服务器 token、配对码、SSH `target.json`、Android keystore、`/android/keystore.properties` 只在本地保存。不要读取、打印或提交。
 - **隐私**：不要把真实会议标题、纪要正文、本机绝对路径写进公开文档、宣传片或提交信息。
@@ -265,6 +267,6 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 [ ] 手机安装 0.2.2 后能打开笔记，且二次打开秒显
 [ ] 新录一段 1 分钟音频，通知栏出现上传进度并很快完成
 [ ] PC 空闲满 10 分钟后，agent.log 出现领取任务
-[ ] 安全组放行后 tailscale ping 显示 direct
+[x] 安全组放行后 tailscale ping 显示 direct（PC/手机均为 53ms 左右）
 [ ] git status 中没有 data/、APK、keystore、promo/ 等不应提交的内容
 ```
