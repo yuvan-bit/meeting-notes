@@ -10,6 +10,7 @@ from logging.handlers import RotatingFileHandler
 
 from .cloud.agent import CloudAgent, cleanup_inbox, collect_status
 from .cloud.client import CloudClient, CloudError
+from .cloud.importer import LocalImportError, push_entry, resolve_entry
 from .cloud.config import (
     AGENT_FILE,
     AGENT_LOCK,
@@ -200,6 +201,23 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0 if health else 1
 
 
+def cmd_push(args: argparse.Namespace) -> int:
+    _load_or_exit()
+    try:
+        entry = resolve_entry(args.entry)
+        result = push_entry(entry)
+    except (LocalImportError, CloudError) as exc:
+        print(f"同步失败：{exc}")
+        return 1
+    if result.get("duplicate"):
+        print("这篇已经在手机端，文件已更新为最新版本。")
+    else:
+        print("已同步到手机端。")
+    print(f"note_id：{result.get('note_id')}")
+    print(f"文件数：{len(result.get('files') or [])}")
+    return 0
+
+
 def cmd_unpair(args: argparse.Namespace) -> int:
     credentials = load_agent() if AGENT_FILE.exists() else None
     if credentials is None:
@@ -237,6 +255,10 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="查看配对、空闲与服务器状态")
     status.add_argument("--url", default="", help="覆盖已保存的服务器地址")
     status.set_defaults(func=cmd_status)
+
+    push = sub.add_parser("push", help="把本地资料库的一篇纪要同步到手机端")
+    push.add_argument("entry", help="资料库条目目录，或条目 job_id")
+    push.set_defaults(func=cmd_push)
 
     unpair = sub.add_parser("unpair", help="删除本机配对信息")
     unpair.add_argument("--yes", action="store_true", help="不询问直接删除")

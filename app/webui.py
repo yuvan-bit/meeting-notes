@@ -153,6 +153,24 @@ def open_entry_folder(job_id: str | None) -> str:
     return f"已在资源管理器中打开：`{target}`"
 
 
+def sync_library_entry(job_id: str | None) -> str:
+    entry = _find_entry(job_id)
+    if entry is None:
+        return "请先选择一条记录。"
+    from .cloud.importer import LocalImportError, push_entry
+
+    try:
+        result = push_entry(entry)
+    except LocalImportError as exc:
+        return f"同步失败：{exc}"
+    except Exception as exc:
+        traceback.print_exc()
+        return f"同步失败：{exc}"
+    if result.get("duplicate"):
+        return f"这篇已在手机端，已刷新为本地最新内容（`{result.get('note_id')}`）。"
+    return f"已同步到手机，打开 App 下拉刷新即可看到（`{result.get('note_id')}`）。"
+
+
 def preview_explorer(selected) -> str:
     if not selected:
         return "在文件树中选择一个或多个文件，即可在这里预览。"
@@ -295,6 +313,7 @@ def build_demo() -> gr.Blocks:
                 )
                 with gr.Row():
                     open_button = gr.Button("打开所在文件夹", size="sm")
+                    sync_button = gr.Button("同步到手机", size="sm")
                     library_status = gr.Markdown("选择一条记录可预览内容。")
                 with gr.Tabs():
                     with gr.Tab("纪要 / 笔记"):
@@ -383,6 +402,11 @@ def build_demo() -> gr.Blocks:
         )
         open_button.click(
             open_entry_folder,
+            inputs=library_select,
+            outputs=library_status,
+        )
+        sync_button.click(
+            sync_library_entry,
             inputs=library_select,
             outputs=library_status,
         )

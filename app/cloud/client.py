@@ -168,3 +168,24 @@ class CloudClient:
             raise CloudError(f"回传失败状态失败：{exc}") from exc
         _raise_for(response)
         return response.json()
+
+    def import_note(self, payload: dict, paths: list[Path]) -> dict:
+        files = []
+        with ExitStack() as stack:
+            for path in paths:
+                handle: BinaryIO = stack.enter_context(path.open("rb"))
+                mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+                files.append(("files", (path.name, handle, mime)))
+            try:
+                response = self._client.post(
+                    "/api/v1/notes/import",
+                    data={key: str(value) for key, value in payload.items()},
+                    files=files,
+                    timeout=httpx.Timeout(
+                        connect=15.0, read=300.0, write=300.0, pool=15.0
+                    ),
+                )
+            except httpx.HTTPError as exc:
+                raise CloudError(f"同步本地纪要失败：{exc}") from exc
+        _raise_for(response)
+        return response.json()
