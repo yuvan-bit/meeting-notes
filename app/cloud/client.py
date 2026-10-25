@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+import time
 from contextlib import ExitStack
 from pathlib import Path
 from typing import BinaryIO
@@ -119,23 +120,75 @@ class CloudClient:
 
     def download_audio(self, recording_id: str, dest: Path) -> tuple[int, str]:
         dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.unlink(missing_ok=True)
+        url = f"/api/v1/agent/recordings/{recording_id}/audio"
         digest = hashlib.sha256()
         total = 0
-        try:
-            with self._client.stream(
-                "GET", f"/api/v1/agent/recordings/{recording_id}/audio"
-            ) as response:
-                if not response.is_success:
-                    response.read()
-                    _raise_for(response)
-                with dest.open("wb") as handle:
-                    for block in response.iter_bytes(1024 * 1024):
-                        handle.write(block)
-                        digest.update(block)
-                        total += len(block)
-        except httpx.HTTPError as exc:
+        expected: int | None = None
+        chunk_size = 1024 * 1024
+        timeout = httpx.Timeout(connect=15.0, read=180.0, write=60.0, pool=15.0)
+
+        with dest.open("wb") as handle:
+            while expected is None or total < expected:
+                start = total
+                end = start + chunk_size - 1
+                last_error: Exception | None = None
+                data: bytes | None = None
+                full_file = False
+                for attempt in range(1, 4):
+                    try:
+                        with self._client.stream(
+                            "GET",
+                            url,
+                            headers={"Range": f"bytes={start}-{end}"},
+                            timeout=timeout,
+                        ) as response:
+                            if response.status_code not in (200, 206):
+                                response.read()
+                                _raise_for(response)
+                            if response.status_code == 200:
+                                full_file = True
+                            else:
+                                content_range = response.headers.get("content-range", "")
+                                if not content_range:
+                                    raise CloudError("服务器未返回音频范围")
+                                try:
+                                    unit, _, rest = content_range.partition(" ")
+                                    range_part, _, total_part = rest.partition("/")
+                                    begin_text, _, _ = range_part.partition("-")
+                                    begin = int(begin_text)
+                                    chunk_total = int(total_part)
+                                except ValueError as exc:
+                                    raise CloudError("服务器返回了无效的音频范围") from exc
+                                if begin != start:
+                                    raise CloudError("服务器返回的音频范围不连续")
+                                if expected is None:
+                                    expected = chunk_total
+                                elif expected != chunk_total:
+                                    raise CloudError("音频总大小在下载过程中发生变化")
+                            data = b"".join(response.iter_bytes(1024 * 1024))
+                        if data:
+                            break
+                        last_error = CloudError("服务器返回了空的音频分片")
+                    except httpx.HTTPError as exc:
+                        last_error = exc
+                    except CloudError:
+                        raise
+                    if attempt < 3:
+                        time.sleep(1.5 * attempt)
+
+                if data is None:
+                    dest.unlink(missing_ok=True)
+                    raise CloudError(f"下载音频失败：{last_error or '未知错误'}")
+                if full_file:
+                    expected = len(data)
+                handle.write(data)
+                digest.update(data)
+                total += len(data)
+
+        if total == 0:
             dest.unlink(missing_ok=True)
-            raise CloudError(f"下载音频失败：{exc}") from exc
+            raise CloudError("下载音频失败：文件为空")
         return total, digest.hexdigest()
 
     def upload_result(self, job_id: str, paths: list[Path]) -> dict:

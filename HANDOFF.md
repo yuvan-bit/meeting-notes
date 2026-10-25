@@ -30,7 +30,7 @@
 - 对外访问：Tailscale Serve 把 443 转发到 `127.0.0.1:8000`；FastAPI 本身不监听公网。
 - Tailscale 直连已建立（2026-10-26）：安全组新增 UDP 41641，PC 和手机均已走 `direct`。
 - 同机共存：Koishi、NapCat。**不要改动这两个服务**，也不要动无关端口。
-- 服务器健康检查当时返回：4 条笔记、1 个排队任务、4 个服务全部 active。
+- 服务器健康检查当时返回：5 条笔记、队列为空（2026-10-26 07:40）。
 - 服务器版本字段仍为 `0.1.0`，与 Android 版本号无关。
 
 ### 安卓发布
@@ -42,7 +42,9 @@
 
 ### 队列
 
-写交接时服务器有 1 个已上传待转写任务。PC 代理日志显示它每 2 分钟运行一次，但用户仍在操作电脑（空闲未满 600 秒），所以按设计暂不领取。等电脑空闲满 10 分钟会自动开始。日志：`data/cloud/agent.log`。
+2026-10-26 凌晨有一个 26 分钟录音进入队列。代理在 03:21 领取，但前两次因旧版整文件下载在 1MB 处超时，第三次下载成功后 **Ollama 未运行**，摘要阶段失败并被标记 failed。修复后已重新排队，07:37 成功生成笔记，队列恢复为空。
+
+日志：`data/cloud/agent.log`。详细修复见 5.5。
 
 ## 3. 架构与数据流
 
@@ -146,6 +148,25 @@ Android 录音 ──分片上传──▶ FastAPI 控制面（SQLite + 文件�
 - 源材料：`promo/render.py`、`promo/frames.py`、`promo/music.py`、`promo/narration.py`、`promo/segments.json`，音频和帧在 `promo/audio`、`promo/frames`。
 - `promo/` 整体约 170MB，已加入 `.gitignore`，**不要强制 `git add`**；需要归档时放 Release 或本地存储。
 
+### 5.5 PC 代理可靠性（2026-10-26）
+
+夜间任务失败的根因不是电脑没开，而是：
+
+- 前两次下载音频时，旧版整文件流在 1MB 处停顿，触发 120 秒读超时；
+- 第三次下载成功，但 Ollama 没有运行，摘要阶段连接 `127.0.0.1:11434` 被拒绝，任务耗尽 3 次尝试后标记 failed。
+
+修复：
+
+- `CloudClient.download_audio()` 改为 **1MB Range 分片下载**，每片最多重试 3 次，按 `Content-Range` 校验连续性，最后校验整文件 SHA-256；同样 6.5MB 音频从反复超时变为约 10 秒完成。
+- `app/cloud/ollama.py` 新增 `ensure_ollama()`：领取任务前先检查 11434；不在时优先触发 `OllamaKeepAlive` 计划任务，再尝试直接启动。
+- `tools/install_agent_task.ps1` 现在同时安装：
+  - `MeetingNotesCloudAgent`：每 2 分钟检查队列；
+  - `OllamaKeepAlive`：每 5 分钟检查并拉起 Ollama。
+- `tools/ollama-keepalive.cmd` 是保活脚本源文件，安装时复制到 `%LOCALAPPDATA%\MeetingNotes\ollama-keepalive.cmd`。
+- `server/tests/test_cloud_agent.py` 已把 Ollama 检查替换为 mock，测试不再依赖本机 Ollama。
+
+如果 Ollama 以后再次被关闭，代理会记录「Ollama 未运行，暂不领取任务」并保留队列，保活任务会在 5 分钟内把它拉起来，不会再把任务打到 failed。
+
 ## 6. 常用命令
 
 ### 测试
@@ -231,6 +252,11 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
    - `README.md`、`HANDOFF.md`、`.gitignore`
 4. **`docs: record Tailscale direct connection`**
    - `HANDOFF.md`（直连验证与实测速率）
+5. **`fix(agent): keep Ollama available and resume stalled downloads`**
+   - `app/cloud/client.py`、`app/cloud/agent.py`、`app/cloud/ollama.py`
+   - `server/tests/test_cloud_agent.py`
+   - `tools/install_agent_task.ps1`、`tools/ollama-keepalive.cmd`
+   - `HANDOFF.md`（本次故障与修复）
 
 **不要提交**：
 
@@ -244,7 +270,7 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
    - 笔记列表 / 详情第二次打开是秒显；
    - 断网或 Tailscale 未连时仍能看到缓存，详情页会显示「上次缓存」提示；
    - 上传通知栏显示进度，短录音能很快完成。
-3. 确认队列中的任务在电脑空闲后正常领取并回传。
+3. 队列中的 26 分钟录音已处理完成（notes=5，队列为空）；继续观察下一次夜间任务是否正常。
 4. `promo/` 已加入 `.gitignore`；如需长期归档，发布到 GitHub Release 或移出仓库。
 5. 视情况在手机上把 Tailscale 设为「始终开启 VPN」并关闭其电池优化，减少隧道断开。
 
@@ -257,12 +283,15 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 - **隐私**：不要把真实会议标题、纪要正文、本机绝对路径写进公开文档、宣传片或提交信息。
 - **应用更新**：Android 必须继续使用现有稳定签名；发布前核对 `versionCode` 严格递增。
 - **资源限制**：服务器 2C2G，`meeting-notes.service` 内存上限 300MB；线上分片大小 1MB（`MEETING_CHUNK_MB=1`）。不要随意加大并发或分片，先看内存和磁盘。
+- **Ollama 保活**：不要删除 `OllamaKeepAlive` 计划任务。摘要依赖本机 Ollama；代理领取前会检查，缺失时会跳过领取而不是把任务打成 failed。
 - **服务器版本号**：服务端健康检查的 `version` 仍是 `0.1.0`，属于历史配置；排查时不要拿它和 Android 版本混淆。
 
 ## 10. 快速验收清单
 
 ```text
 [ ] /health 返回 ok=true，notes 数量符合预期
+[x] 长音频任务在 Ollama 运行时能完成分片下载、转写和摘要；队列清空
+[x] OllamaKeepAlive 任务每 5 分钟检查，Ollama 停止后能自动拉起
 [ ] /api/v1/app/latest 返回 version_code=4 / 0.2.2
 [ ] 手机安装 0.2.2 后能打开笔记，且二次打开秒显
 [ ] 新录一段 1 分钟音频，通知栏出现上传进度并很快完成

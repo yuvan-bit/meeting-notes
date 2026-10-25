@@ -175,6 +175,7 @@ def _agent(tmp_path: Path, monkeypatch, base_url: str, pc_id: str, pc_token: str
         target = tmp_path / name.lower()
         target.mkdir()
         monkeypatch.setattr(agent_module, name, target)
+    monkeypatch.setattr(agent_module, "ensure_ollama", lambda: True)
     credentials = AgentCredentials(
         server_url=base_url,
         device_id=pc_id,

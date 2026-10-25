@@ -19,6 +19,7 @@ from .config import (
     AgentSettings,
 )
 from .idle import IdleStatus, evaluate_idle
+from .ollama import ensure_ollama
 from .store import AgentCredentials
 
 logger = logging.getLogger("cloud_agent")
@@ -135,6 +136,9 @@ class CloudAgent:
         status = evaluate_idle(self.settings, force=force)
         if not status.ready:
             logger.info("暂不领取任务：%s", "；".join(status.reasons))
+            return "idle"
+        if not ensure_ollama():
+            logger.warning("Ollama 未运行，暂不领取任务")
             return "idle"
         job = self.client.next_job()
         if job is None:
