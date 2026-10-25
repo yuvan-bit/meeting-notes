@@ -60,15 +60,16 @@ fun NotesScreen(onOpenNote: (String) -> Unit) {
 
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf("") }
-    var notes by remember { mutableStateOf<List<NoteItem>>(emptyList()) }
-    var total by remember { mutableIntStateOf(0) }
+    val cached = remember { container.noteCache.loadList() }
+    var notes by remember { mutableStateOf<List<NoteItem>>(cached?.items ?: emptyList()) }
+    var total by remember { mutableIntStateOf(cached?.total ?: 0) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var reloadKey by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(query, filter, reloadKey) {
         if (query.isNotBlank()) delay(350)
-        loading = true
+        loading = notes.isEmpty()
         error = null
         try {
             val page = container.api.listNotes(
@@ -78,6 +79,9 @@ fun NotesScreen(onOpenNote: (String) -> Unit) {
             )
             notes = page.items
             total = page.total
+            if (query.isBlank() && filter.isEmpty()) {
+                container.noteCache.saveList(page)
+            }
         } catch (e: Exception) {
             error = e.message ?: "加载笔记失败"
         } finally {

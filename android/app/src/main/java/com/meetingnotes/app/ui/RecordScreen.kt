@@ -371,7 +371,7 @@ fun RecordScreen() {
                     recording = recording,
                     onRetry = {
                         container.recordings.markRetry(recording.id, "")
-                        UploadScheduler.enqueue(context, recording.id)
+                        UploadScheduler.enqueue(context, recording.id, replace = true)
                     },
                 )
             }

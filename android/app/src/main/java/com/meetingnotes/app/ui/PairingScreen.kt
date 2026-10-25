@@ -89,6 +89,7 @@ fun PairingScreen(
                     deviceId = result.deviceId,
                     deviceName = deviceName,
                 )
+                container.noteCache.clear()
                 onPaired()
             } catch (e: Exception) {
                 error = e.message ?: "配对失败，请检查地址与配对码"

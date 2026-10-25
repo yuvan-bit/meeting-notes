@@ -39,6 +39,13 @@ class ApiClient(private val settings: SettingsStore) {
         .retryOnConnectionFailure(true)
         .build()
 
+    private val uploadClient = client.newBuilder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .callTimeout(180, TimeUnit.SECONDS)
+        .build()
+
     private val downloadClient = client.newBuilder()
         .readTimeout(300, TimeUnit.SECONDS)
         .build()
@@ -112,7 +119,12 @@ class ApiClient(private val settings: SettingsStore) {
             .header("X-Chunk-SHA256", sha256)
             .put(data.toRequestBody(binaryMedia))
             .build()
-        execute(request, authenticated = true)
+        executeRaw(request, authenticated = true, http = uploadClient)
+    }
+
+    fun resetConnections() {
+        client.connectionPool.evictAll()
+        uploadClient.connectionPool.evictAll()
     }
 
     suspend fun completeRecording(recordingId: String): CompleteResponse {
@@ -252,6 +264,7 @@ class ApiClient(private val settings: SettingsStore) {
     private suspend fun executeRaw(
         request: Request,
         authenticated: Boolean = true,
+        http: OkHttpClient = client,
     ): Response = withContext(Dispatchers.IO) {
         val finalRequest = if (authenticated && request.header("Authorization") == null) {
             request.newBuilder().header("Authorization", "Bearer ${settings.token}").build()
@@ -259,7 +272,7 @@ class ApiClient(private val settings: SettingsStore) {
             request
         }
         val response = try {
-            client.newCall(finalRequest).await()
+            http.newCall(finalRequest).await()
         } catch (e: IOException) {
             throw ApiException("无法连接服务器：${e.message ?: "网络错误"}")
         }

@@ -6,6 +6,7 @@ import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.meetingnotes.app.data.ApiClient
+import com.meetingnotes.app.data.NoteCache
 import com.meetingnotes.app.data.RecordingStore
 import com.meetingnotes.app.data.SettingsStore
 import com.meetingnotes.app.recording.RecordingController
@@ -15,6 +16,7 @@ class AppContainer(context: Context) {
     val settings = SettingsStore(context)
     val api = ApiClient(settings)
     val recordings = RecordingStore(context)
+    val noteCache = NoteCache(context)
     val recordingController = RecordingController()
     val updates = UpdateController(context, api, settings)
 }
@@ -35,6 +37,7 @@ object Notifications {
     const val CHANNEL_UPLOAD = "upload"
     const val RECORDING_ID = 1001
     const val UPLOAD_ID = 1002
+    const val STATUS_ID = 1003
 
     fun createChannels(context: Context) {
         val manager = NotificationManagerCompat.from(context)
@@ -62,7 +65,7 @@ object Notifications {
             .build()
         runCatching {
             NotificationManagerCompat.from(context)
-                .notify(UPLOAD_ID, notification)
+                .notify(STATUS_ID, notification)
         }
     }
 }

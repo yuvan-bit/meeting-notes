@@ -67,19 +67,29 @@ fun NoteDetailScreen(jobId: String, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    var detail by remember { mutableStateOf<NoteDetail?>(null) }
-    var loading by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
+    val cached = remember(jobId) { container.noteCache.loadDetail(jobId) }
+    var detail by remember(jobId) { mutableStateOf(cached) }
+    var loading by remember(jobId) { mutableStateOf(cached == null) }
+    var error by remember(jobId) { mutableStateOf<String?>(null) }
+    var stale by remember(jobId) { mutableStateOf(false) }
     var reloadKey by remember { mutableStateOf(0) }
     var downloading by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(jobId, reloadKey) {
-        loading = true
+        if (detail == null) loading = true
         error = null
+        stale = false
         try {
-            detail = container.api.noteDetail(jobId)
+            val fresh = container.api.noteDetail(jobId)
+            detail = fresh
+            container.noteCache.saveDetail(fresh)
+            stale = false
         } catch (e: Exception) {
-            error = e.message ?: "加载笔记失败"
+            if (detail == null) {
+                error = e.message ?: "加载笔记失败"
+            } else {
+                stale = true
+            }
         } finally {
             loading = false
         }
@@ -197,6 +207,23 @@ fun NoteDetailScreen(jobId: String, onBack: () -> Unit) {
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
+                                }
+                            }
+                        }
+
+                        if (stale) {
+                            item {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        "网络较慢，当前显示上次缓存",
+                                        modifier = Modifier.weight(1f),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    TextButton(onClick = { reloadKey += 1 }) { Text("刷新") }
                                 }
                             }
                         }

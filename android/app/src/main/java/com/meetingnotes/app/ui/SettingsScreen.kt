@@ -340,6 +340,7 @@ fun SettingsScreen(onUnpaired: () -> Unit) {
                 TextButton(onClick = {
                     confirmUnpair = false
                     container.settings.clearPairing()
+                    container.noteCache.clear()
                     onUnpaired()
                 }) {
                     Text("解除", color = MaterialTheme.colorScheme.error)

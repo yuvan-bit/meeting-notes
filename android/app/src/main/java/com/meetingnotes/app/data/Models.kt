@@ -50,6 +50,13 @@ data class NotesPage(
 )
 
 @Serializable
+data class CachedNotesPage(
+    val savedAtMs: Long = 0,
+    val items: List<NoteItem> = emptyList(),
+    val total: Int = 0,
+)
+
+@Serializable
 data class NoteDetail(
     @SerialName("job_id") val jobId: String,
     @SerialName("recording_id") val recordingId: String,
