@@ -8,14 +8,16 @@ $root = Split-Path -Parent $PSScriptRoot
 if (-not $root) { $root = (Get-Location).Path }
 $taskName = "MeetingNotesCloudAgent"
 $ollamaTaskName = "OllamaKeepAlive"
-$keepaliveSource = Join-Path $PSScriptRoot "ollama-keepalive.cmd"
+$keepaliveSource = Join-Path $PSScriptRoot "ollama-keepalive.vbs"
 $keepaliveDir = Join-Path $env:LOCALAPPDATA "MeetingNotes"
-$keepaliveTarget = Join-Path $keepaliveDir "ollama-keepalive.cmd"
+$keepaliveTarget = Join-Path $keepaliveDir "ollama-keepalive.vbs"
+$oldKeepaliveTarget = Join-Path $keepaliveDir "ollama-keepalive.cmd"
 
 if ($Uninstall) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $ollamaTaskName -Confirm:$false -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $keepaliveTarget -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $oldKeepaliveTarget -Force -ErrorAction SilentlyContinue
     Write-Host "Removed scheduled tasks '$taskName' and '$ollamaTaskName'."
     exit 0
 }
@@ -36,7 +38,8 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($logon, $r
 if (Test-Path -LiteralPath $keepaliveSource) {
     New-Item -ItemType Directory -Force -Path $keepaliveDir | Out-Null
     Copy-Item -LiteralPath $keepaliveSource -Destination $keepaliveTarget -Force
-    $ollamaAction = New-ScheduledTaskAction -Execute $keepaliveTarget
+    Remove-Item -LiteralPath $oldKeepaliveTarget -Force -ErrorAction SilentlyContinue
+    $ollamaAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" -Argument ('//B //Nologo "' + $keepaliveTarget + '"')
     $ollamaRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5)
     $ollamaSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName $ollamaTaskName -Action $ollamaAction -Trigger @($logon, $ollamaRepeat) -Settings $ollamaSettings -Principal $principal -Description "Start Ollama if it is not running so the meeting-notes agent can summarize recordings" -Force | Out-Null

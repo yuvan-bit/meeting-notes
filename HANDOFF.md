@@ -162,7 +162,7 @@ Android 录音 ──分片上传──▶ FastAPI 控制面（SQLite + 文件�
 - `tools/install_agent_task.ps1` 现在同时安装：
   - `MeetingNotesCloudAgent`：每 2 分钟检查队列；
   - `OllamaKeepAlive`：每 5 分钟检查并拉起 Ollama。
-- `tools/ollama-keepalive.cmd` 是保活脚本源文件，安装时复制到 `%LOCALAPPDATA%\MeetingNotes\ollama-keepalive.cmd`。
+- `tools/ollama-keepalive.vbs` 是保活脚本源文件，安装时复制到 `%LOCALAPPDATA%\MeetingNotes\ollama-keepalive.vbs`；计划任务用 `wscript.exe //B //Nologo` 运行，**不要改回 .cmd**，否则每 5 分钟会闪一次 cmd 窗口。
 - `server/tests/test_cloud_agent.py` 已把 Ollama 检查替换为 mock，测试不再依赖本机 Ollama。
 
 如果 Ollama 以后再次被关闭，代理会记录「Ollama 未运行，暂不领取任务」并保留队列，保活任务会在 5 分钟内把它拉起来，不会再把任务打到 failed。
@@ -255,7 +255,7 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 5. **`fix(agent): keep Ollama available and resume stalled downloads`**
    - `app/cloud/client.py`、`app/cloud/agent.py`、`app/cloud/ollama.py`
    - `server/tests/test_cloud_agent.py`
-   - `tools/install_agent_task.ps1`、`tools/ollama-keepalive.cmd`
+   - `tools/install_agent_task.ps1`、`tools/ollama-keepalive.vbs`
    - `HANDOFF.md`（本次故障与修复）
 
 **不要提交**：
