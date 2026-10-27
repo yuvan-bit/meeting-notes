@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +15,7 @@ from .config import (
     INBOX_DIR,
     ORPHAN_DIR,
     OUTBOX_DIR,
+    PREFETCH_DIR,
     AgentSettings,
 )
 from .idle import IdleStatus, evaluate_idle
@@ -36,6 +36,8 @@ RESULT_FILE_NAMES = (
     "transcript.json",
     "meta.json",
 )
+PREFETCH_MANIFEST = "manifest.json"
+MAX_LOCAL_FAILURES = 3
 PIPELINE_FILE_KEYS = {
     "minutes.md": "minutes",
     "transcript.md": "transcript_md",
@@ -133,18 +135,19 @@ class CloudAgent:
 
     def tick(self, force: bool = False) -> str:
         self.flush_outbox()
+        self.prefetch_jobs()
         status = evaluate_idle(self.settings, force=force)
         if not status.ready:
             logger.info("暂不领取任务：%s", "；".join(status.reasons))
             return "idle"
         if not ensure_ollama():
-            logger.warning("Ollama 未运行，暂不领取任务")
+            logger.warning("Ollama 未运行，暂不转写")
             return "idle"
-        job = self.client.next_job()
-        if job is None:
-            logger.info("服务器暂无待处理录音")
+        folder = self.next_local_job()
+        if folder is None:
+            logger.info("本地没有待转写音频")
             return "empty"
-        self.process_job(job)
+        self.process_local_job(folder)
         return "processed"
 
     def flush_outbox(self) -> int:
@@ -179,9 +182,12 @@ class CloudAgent:
         try:
             response = self.client.upload_result(job_id, paths)
         except CloudError as exc:
-            if exc.status_code in {404, 409, 410}:
+            if exc.status_code in {404, 410}:
                 _move_to_orphan(folder, f"服务器拒绝：{exc}")
                 return "orphaned"
+            if exc.status_code == 409:
+                logger.info("任务暂不可上传，稍后重试：%s", exc)
+                return "pending"
             logger.warning("上传结果失败，稍后重试：%s", exc)
             return "pending"
         shutil.rmtree(folder, ignore_errors=True)
@@ -193,83 +199,189 @@ class CloudAgent:
         )
         return "uploaded"
 
-    def process_job(self, job: dict) -> None:
-        job_id = str(job["job_id"])
-        recording = job.get("recording") or {}
-        recording_id = str(job["recording_id"])
-        original = str(recording.get("original_filename") or "")
-        audio_path = INBOX_DIR / f"{job_id}{_audio_suffix(original)}"
+    def prefetch_jobs(self) -> int:
+        PREFETCH_DIR.mkdir(parents=True, exist_ok=True)
+        local = self._local_jobs()
+        if len(local) >= self.settings.prefetch_limit:
+            return 0
+        try:
+            items = self.client.queued_jobs(
+                limit=max(3, self.settings.prefetch_limit + 2)
+            )
+        except CloudError as exc:
+            logger.warning("暂时无法预取音频：%s", exc)
+            return 0
+
+        for item in items:
+            job_id = str(item.get("job_id") or "")
+            if not job_id:
+                continue
+            if (
+                job_id in local
+                or (OUTBOX_DIR / job_id).exists()
+                or self._is_orphaned(job_id)
+            ):
+                continue
+            try:
+                self._prefetch_job(item)
+                logger.info("已预取音频：job=%s", job_id)
+                return 1
+            except (CloudError, AgentError, OSError, ValueError) as exc:
+                logger.warning("预取音频失败：job=%s %s", job_id, exc)
+        return 0
+
+    def _prefetch_job(self, item: dict) -> None:
+        job_id = str(item["job_id"])
+        recording_id = str(item["recording_id"])
+        recording = item.get("recording") or {}
+        if not isinstance(recording, dict):
+            raise AgentError("任务缺少录音信息")
+        suffix = _audio_suffix(str(recording.get("original_filename") or ""))
+        target = PREFETCH_DIR / job_id
+        temp = PREFETCH_DIR / f".tmp-{job_id}-{int(time.time())}"
+        shutil.rmtree(temp, ignore_errors=True)
+        temp.mkdir(parents=True, exist_ok=False)
+        audio = temp / f"audio{suffix}"
+        try:
+            size, digest = self.client.download_audio(recording_id, audio)
+            expected_size = int(recording.get("size_bytes") or 0)
+            expected_hash = str(recording.get("sha256") or "").lower()
+            if expected_size and size != expected_size:
+                raise AgentError(f"音频大小不一致：{size}/{expected_size}")
+            if expected_hash and digest != expected_hash:
+                raise AgentError("音频完整性校验失败（SHA-256 不一致）")
+            manifest = {
+                "job_id": job_id,
+                "recording_id": recording_id,
+                "recording": recording,
+                "audio_file": audio.name,
+                "downloaded_at": datetime.now().replace(microsecond=0).isoformat(),
+                "failures": 0,
+            }
+            (temp / PREFETCH_MANIFEST).write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            temp.replace(target)
+        except Exception:
+            shutil.rmtree(temp, ignore_errors=True)
+            raise
+
+    def _local_jobs(self) -> set[str]:
+        if not PREFETCH_DIR.is_dir():
+            return set()
+        return {
+            folder.name
+            for folder in PREFETCH_DIR.iterdir()
+            if folder.is_dir() and not folder.name.startswith(".tmp-")
+        }
+
+    def next_local_job(self) -> Path | None:
+        if not PREFETCH_DIR.is_dir():
+            return None
+        folders = [
+            folder
+            for folder in PREFETCH_DIR.iterdir()
+            if folder.is_dir() and not folder.name.startswith(".tmp-")
+        ]
+        folders.sort(key=lambda folder: folder.stat().st_mtime)
+        for folder in folders:
+            manifest_path = folder / PREFETCH_MANIFEST
+            if not manifest_path.is_file():
+                _move_to_orphan(folder, "预取目录缺少清单")
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                _move_to_orphan(folder, "预取清单无法读取")
+                continue
+            if not isinstance(manifest, dict):
+                _move_to_orphan(folder, "预取清单格式无效")
+                continue
+            audio_name = str(manifest.get("audio_file") or "")
+            if not audio_name or not (folder / audio_name).is_file():
+                _move_to_orphan(folder, "预取音频缺失")
+                continue
+            return folder
+        return None
+
+    def process_local_job(self, folder: Path) -> None:
+        try:
+            manifest = json.loads(
+                (folder / PREFETCH_MANIFEST).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as exc:
+            _move_to_orphan(folder, f"预取清单无法读取：{exc}")
+            return
+        if not isinstance(manifest, dict):
+            _move_to_orphan(folder, "预取清单格式无效")
+            return
+        job_id = str(manifest.get("job_id") or folder.name)
+        recording_id = str(manifest.get("recording_id") or "")
+        recording = manifest.get("recording") or {}
+        if not isinstance(recording, dict):
+            recording = {}
+        audio = folder / str(manifest.get("audio_file") or "")
         logger.info(
-            "领取任务 job=%s 标题=%s 大小=%s 时长=%s",
+            "开始本地转写 job=%s 标题=%s 大小=%s 时长=%s",
             job_id,
             recording.get("title", ""),
             recording.get("size_bytes", 0),
             recording.get("duration_s"),
         )
-
-        stop = threading.Event()
-        lease_seconds = int(job.get("lease_seconds") or 900)
-        interval = max(60, min(self.settings.heartbeat_seconds, lease_seconds // 3))
-        heartbeat = threading.Thread(
-            target=self._heartbeat_loop,
-            args=(job_id, interval, stop),
-            daemon=True,
-            name="cloud-heartbeat",
-        )
-        heartbeat.start()
-        success = False
         try:
-            try:
-                size, digest = self.client.download_audio(recording_id, audio_path)
-            except CloudError as exc:
-                raise AgentError(f"下载音频失败：{exc}") from exc
-            expected = str(recording.get("sha256") or "").lower()
-            if expected and digest != expected:
-                raise AgentError("音频完整性校验失败（SHA-256 不一致）")
-            logger.info("音频已下载并通过校验：%s 字节", size)
-
             result = self.pipeline(
-                audio_path,
+                audio,
                 content_type=str(recording.get("content_type") or "auto"),
                 model=self.settings.model,
                 asr_device=self.settings.asr_device,
                 lock_wait=False,
             )
-            folder = save_outbox(job_id, recording_id, result)
+            outbox = save_outbox(job_id, recording_id, result)
             logger.info("本地转写完成：%s（%s）", result.topic, result.output_dir)
-            self._upload_folder(folder)
-            success = True
-        except ProcessingBusy:
-            self._fail(job_id, "本机算力正被其他任务占用，稍后重试")
-        except AgentError as exc:
-            logger.warning("任务失败：%s", exc)
-            self._fail(job_id, str(exc))
-        except Exception as exc:
-            logger.exception("任务处理异常：%s", job_id)
-            self._fail(job_id, f"处理失败：{exc}")
-        finally:
-            stop.set()
-            heartbeat.join(timeout=5)
-            audio_path.unlink(missing_ok=True)
-            logger.info("任务收尾：job=%s success=%s", job_id, success)
-
-    def _fail(self, job_id: str, message: str) -> None:
-        try:
-            response = self.client.fail(job_id, message)
-            logger.info("已回传失败状态：%s → %s", job_id, response.get("status"))
-        except CloudError as exc:
-            logger.warning("回传失败状态失败（任务可能已超时）：%s", exc)
-
-    def _heartbeat_loop(self, job_id: str, interval: int, stop: threading.Event) -> None:
-        while not stop.wait(interval):
             try:
-                self.client.heartbeat(job_id)
-                logger.debug("心跳成功：%s", job_id)
-            except CloudError as exc:
-                if exc.status_code == 409:
-                    logger.warning("任务租约已失效：%s", job_id)
-                    return
-                logger.warning("心跳失败，稍后重试：%s", exc)
+                self._upload_folder(outbox)
+            except AgentError as exc:
+                logger.warning("结果上传失败，保留待重试：%s", exc)
+            shutil.rmtree(folder, ignore_errors=True)
+            logger.info("本地任务完成：job=%s", job_id)
+        except ProcessingBusy:
+            logger.warning("本机算力正被其他任务占用，稍后重试：%s", job_id)
+        except Exception as exc:
+            logger.exception("本地转写失败：%s", job_id)
+            self._record_local_failure(folder, manifest, exc)
+
+    def _record_local_failure(self, folder: Path, manifest: dict, exc: Exception) -> None:
+        failures = int(manifest.get("failures") or 0) + 1
+        manifest["failures"] = failures
+        manifest["last_error"] = str(exc)[:500]
+        try:
+            (folder / PREFETCH_MANIFEST).write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        if failures >= MAX_LOCAL_FAILURES:
+            _move_to_orphan(folder, f"本地转写失败 {failures} 次：{exc}")
+        else:
+            logger.warning(
+                "本地转写失败 %d/%d，保留待重试：%s",
+                failures,
+                MAX_LOCAL_FAILURES,
+                folder.name,
+            )
+
+    def _is_orphaned(self, job_id: str) -> bool:
+        if not ORPHAN_DIR.is_dir():
+            return False
+        prefix = f"{job_id}_"
+        return any(
+            path.is_dir() and path.name.startswith(prefix)
+            for path in ORPHAN_DIR.iterdir()
+        )
 
 
 def collect_status(

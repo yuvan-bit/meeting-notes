@@ -10,7 +10,7 @@
 
 - **安卓 App**：录音、暂停/续录、分片上传、浏览笔记、应用内更新。
 - **云控制面**：FastAPI + SQLite，负责配对、任务队列、音频中转、笔记存储和应用更新。只部署在 Tailscale 内，不开放公网 HTTP 端口。
-- **PC 空闲代理**：Windows 计划任务每 2 分钟检查一次；用户空闲满 10 分钟、接电源、CPU/GPU 低负载时领取任务，在本机用 FunASR + Ollama 转写并回传。
+- **PC 空闲代理**：Windows 计划任务每 2 分钟检查一次；联网时把未转写音频预取到本地队列，用户空闲满 10 分钟、接电源、CPU/GPU 低负载时离线转写，恢复联网后自动回传。断网期间仍可继续处理已预取的音频。
 - **PC 工作台**：Gradio 界面，支持本机上传处理、资料库浏览、一键把本地纪要同步到手机。
 
 数据默认留在本机。服务器音频最多保留 5GB / 30 天，笔记和转写稿永久保留。
@@ -51,7 +51,7 @@
 ```text
 Android 录音 ──分片上传──▶ FastAPI 控制面（SQLite + 文件仓库）
                                   ▲
-                                  │ 领取任务 / 回传结果
+                                  │ 预取音频 / 回传结果
                        PC 空闲代理（FunASR + Ollama）
                                   │
                                   ▼
@@ -158,14 +158,31 @@ Android 录音 ──分片上传──▶ FastAPI 控制面（SQLite + 文件�
 修复：
 
 - `CloudClient.download_audio()` 改为 **1MB Range 分片下载**，每片最多重试 3 次，按 `Content-Range` 校验连续性，最后校验整文件 SHA-256；同样 6.5MB 音频从反复超时变为约 10 秒完成。
-- `app/cloud/ollama.py` 新增 `ensure_ollama()`：领取任务前先检查 11434；不在时优先触发 `OllamaKeepAlive` 计划任务，再尝试直接启动。
+- `app/cloud/ollama.py` 新增 `ensure_ollama()`：预取/转写前先检查 11434；不在时优先触发 `OllamaKeepAlive` 计划任务，再尝试直接启动。
 - `tools/install_agent_task.ps1` 现在同时安装：
   - `MeetingNotesCloudAgent`：每 2 分钟检查队列；
   - `OllamaKeepAlive`：每 5 分钟检查并拉起 Ollama。
 - `tools/ollama-keepalive.vbs` 是保活脚本源文件，安装时复制到 `%LOCALAPPDATA%\MeetingNotes\ollama-keepalive.vbs`；计划任务用 `wscript.exe //B //Nologo` 运行，**不要改回 .cmd**，否则每 5 分钟会闪一次 cmd 窗口。
 - `server/tests/test_cloud_agent.py` 已把 Ollama 检查替换为 mock，测试不再依赖本机 Ollama。
 
-如果 Ollama 以后再次被关闭，代理会记录「Ollama 未运行，暂不领取任务」并保留队列，保活任务会在 5 分钟内把它拉起来，不会再把任务打到 failed。
+如果 Ollama 以后再次被关闭，代理会记录「Ollama 未运行，暂不转写」并保留本地队列，保活任务会在 5 分钟内把它拉起来，不会再把任务打到 failed。
+
+### 5.6 预取、离线转写与联网回传（2026-10-28）
+
+代理流程已从「联网领取→立刻下载→立刻转写→立刻上传」改为三段解耦：
+
+1. **联网预取**：每 2 分钟调用 `GET /api/v1/agent/jobs/queued` 查看排队任务，把音频下载到 `data/cloud/prefetch/<job_id>/`，默认最多保留 2 个；预取不占服务器租约，任务在服务器仍保持 `queued`。
+2. **空闲转写**：本地队列存在时，仍按空闲 10 分钟、接电源、CPU/GPU 低负载的条件启动 FunASR + Ollama；断网也能转写。结果写入 `data/cloud/outbox/<job_id>/`。
+3. **联网回传**：每次 tick 先 `flush_outbox`；服务器允许 PC 对 `queued` 任务直接回传结果（不消耗尝试次数），上传成功即置 `done`。断网时结果留在 outbox，恢复后自动重试。
+
+相关实现：
+
+- `app/cloud/config.py`：新增 `PREFETCH_DIR` 与 `prefetch_limit`（默认 2）。
+- `app/cloud/agent.py`：新增 `prefetch_jobs`、`_prefetch_job`、`next_local_job`、`process_local_job`；转写不再持有租约或心跳线程。
+- `app/cloud/client.py`：新增 `queued_jobs()`；音频下载使用 1MB Range 分片。
+- `server/routers/agent.py`：新增 `GET /agent/jobs/queued`；`POST /agent/jobs/{id}/result` 允许 `queued` 任务直接接收结果；过期租约在预取列表前回收。
+- 本地失败的任务最多重试 3 次，之后移入 `data/cloud/orphaned/`，避免无限占用 GPU；服务器任务仍保留在队列，可人工处理。
+- 当前按**单 PC 代理**设计：预取不占租约，多个 PC 同时预取同一任务会重复计算；回传按 job_id 幂等，但不要同时运行多个代理实例。
 
 ## 6. 常用命令
 
@@ -258,6 +275,11 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
    - `tools/install_agent_task.ps1`、`tools/ollama-keepalive.vbs`
    - `HANDOFF.md`（本次故障与修复）
 
+6. **`feat(agent): prefetch audio and process offline`**
+   - `app/cloud/agent.py`、`app/cloud/client.py`、`app/cloud/config.py`
+   - `server/routers/agent.py`、`server/tests/test_agent_prefetch.py`、`server/tests/test_cloud_agent.py`
+   - `README.md`、`docs/cloud-architecture.md`、`HANDOFF.md`
+
 **不要提交**：
 
 - `promo/`：约 170MB，含最终片和中间素材，已加入 `.gitignore`；如需长期归档，放 GitHub Release 或移出仓库。
@@ -270,7 +292,7 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
    - 笔记列表 / 详情第二次打开是秒显；
    - 断网或 Tailscale 未连时仍能看到缓存，详情页会显示「上次缓存」提示；
    - 上传通知栏显示进度，短录音能很快完成。
-3. 队列中的 26 分钟录音已处理完成（notes=5，队列为空）；继续观察下一次夜间任务是否正常。
+3. 队列中的 26 分钟录音已处理完成（notes=5，队列为空）；下次手机上传后确认「联网预取 → 空闲转写 → 联网回传」全流程，并观察断网时是否继续使用本地队列。
 4. `promo/` 已加入 `.gitignore`；如需长期归档，发布到 GitHub Release 或移出仓库。
 5. 视情况在手机上把 Tailscale 设为「始终开启 VPN」并关闭其电池优化，减少隧道断开。
 
@@ -283,7 +305,9 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 - **隐私**：不要把真实会议标题、纪要正文、本机绝对路径写进公开文档、宣传片或提交信息。
 - **应用更新**：Android 必须继续使用现有稳定签名；发布前核对 `versionCode` 严格递增。
 - **资源限制**：服务器 2C2G，`meeting-notes.service` 内存上限 300MB；线上分片大小 1MB（`MEETING_CHUNK_MB=1`）。不要随意加大并发或分片，先看内存和磁盘。
-- **Ollama 保活**：不要删除 `OllamaKeepAlive` 计划任务。摘要依赖本机 Ollama；代理领取前会检查，缺失时会跳过领取而不是把任务打成 failed。
+- **Ollama 保活**：不要删除 `OllamaKeepAlive` 计划任务。摘要依赖本机 Ollama；代理转写前会检查，缺失时保留本地队列而不是把任务打成 failed。
+- **单 PC 代理**：预取不占服务器租约，当前只应运行一个 PC 代理实例。不要在多台机器同时启用预取，否则会重复下载和计算；结果回传按 job_id 幂等，但不会自动去重计算。
+- **离线结果**：服务端允许 PC 对 `queued` 任务直接回传结果，不消耗 attempts；这是离线转写的关键路径，不要收紧成必须持有租约。
 - **服务器版本号**：服务端健康检查的 `version` 仍是 `0.1.0`，属于历史配置；排查时不要拿它和 Android 版本混淆。
 
 ## 10. 快速验收清单
@@ -295,7 +319,8 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 [ ] /api/v1/app/latest 返回 version_code=4 / 0.2.2
 [ ] 手机安装 0.2.2 后能打开笔记，且二次打开秒显
 [ ] 新录一段 1 分钟音频，通知栏出现上传进度并很快完成
-[ ] PC 空闲满 10 分钟后，agent.log 出现领取任务
+[ ] 联网时 `data/cloud/prefetch/` 出现任务；断网后仍能完成转写并写入 outbox；恢复联网后自动上传
+[ ] PC 空闲满 10 分钟后，agent.log 出现「开始本地转写」而不是旧的「领取任务」
 [x] 安全组放行后 tailscale ping 显示 direct（PC/手机均为 53ms 左右）
 [ ] git status 中没有 data/、APK、keystore、promo/ 等不应提交的内容
 ```

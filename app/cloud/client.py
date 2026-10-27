@@ -110,6 +110,19 @@ class CloudClient:
         _raise_for(response)
         return response.json()
 
+    def queued_jobs(self, limit: int = 3) -> list[dict]:
+        try:
+            response = self._client.get(
+                "/api/v1/agent/jobs/queued",
+                params={"limit": limit},
+            )
+        except httpx.HTTPError as exc:
+            raise CloudError(f"无法连接服务器：{exc}") from exc
+        _raise_for(response)
+        data = response.json()
+        items = data.get("items") if isinstance(data, dict) else None
+        return items if isinstance(items, list) else []
+
     def heartbeat(self, job_id: str) -> dict:
         try:
             response = self._client.post(f"/api/v1/agent/jobs/{job_id}/heartbeat")

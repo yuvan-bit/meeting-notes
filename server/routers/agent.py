@@ -7,7 +7,7 @@ import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from starlette.datastructures import UploadFile
 
@@ -24,6 +24,24 @@ from ..utils import iso, new_id, parse_iso, utcnow
 from .common import get_recording
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+
+
+def _reap_expired(db: sqlite3.Connection, settings: Settings, now: str) -> None:
+    db.execute(
+        "UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires_at=NULL "
+        "WHERE status='leased' AND lease_expires_at < ? AND attempts < ?",
+        (now, settings.max_attempts),
+    )
+    db.execute(
+        "UPDATE jobs SET status='failed', lease_owner=NULL, lease_expires_at=NULL, "
+        "finished_at=? WHERE status='leased' AND lease_expires_at < ? AND attempts >= ?",
+        (now, now, settings.max_attempts),
+    )
+    db.execute(
+        "UPDATE recordings SET status='failed' WHERE id IN ("
+        "SELECT recording_id FROM jobs WHERE status='failed' AND finished_at=?)",
+        (now,),
+    )
 
 
 @router.get("/jobs/next")
@@ -108,6 +126,45 @@ def next_job(
     }
 
 
+@router.get("/jobs/queued")
+def queued_jobs(
+    limit: int = Query(default=3, ge=1, le=10),
+    device: dict = Depends(require_pc),
+    db: sqlite3.Connection = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    now = iso()
+    with db:
+        _reap_expired(db, settings, now)
+    rows = db.execute(
+        "SELECT j.id AS job_id, j.attempts AS job_attempts, j.created_at AS job_created_at, "
+        "r.* FROM jobs j JOIN recordings r ON r.id=j.recording_id "
+        "WHERE j.status='queued' AND j.attempts < ? "
+        "ORDER BY j.created_at LIMIT ?",
+        (settings.max_attempts, limit),
+    ).fetchall()
+    return {
+        "items": [
+            {
+                "job_id": row["job_id"],
+                "recording_id": row["id"],
+                "attempts": row["job_attempts"],
+                "created_at": row["job_created_at"],
+                "recording": {
+                    "title": row["title"],
+                    "content_type": row["content_type"],
+                    "original_filename": row["original_filename"],
+                    "size_bytes": row["size_bytes"],
+                    "sha256": row["sha256"],
+                    "duration_s": row["duration_s"],
+                    "audio_url": f"/api/v1/agent/recordings/{row['id']}/audio",
+                },
+            }
+            for row in rows
+        ]
+    }
+
+
 @router.post("/jobs/{job_id}/heartbeat")
 def heartbeat(
     job_id: str,
@@ -174,9 +231,17 @@ async def upload_result(
                 "duplicate": True,
             }
 
-    if job["status"] != "leased" or job["lease_owner"] != device["id"]:
+    leased_by_device = (
+        job["status"] == "leased" and job["lease_owner"] == device["id"]
+    )
+    queued = job["status"] == "queued" and job["lease_owner"] is None
+    if not (leased_by_device or queued):
         raise HTTPException(status_code=409, detail="任务租约不属于当前设备")
-    if job["lease_expires_at"] and parse_iso(job["lease_expires_at"]) <= utcnow():
+    if (
+        leased_by_device
+        and job["lease_expires_at"]
+        and parse_iso(job["lease_expires_at"]) <= utcnow()
+    ):
         raise HTTPException(status_code=409, detail="任务租约已过期")
 
     form = await request.form()

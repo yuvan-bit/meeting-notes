@@ -171,7 +171,7 @@ def _fake_pipeline_factory(tmp_path: Path, expected: bytes):
 
 
 def _agent(tmp_path: Path, monkeypatch, base_url: str, pc_id: str, pc_token: str, pipeline):
-    for name in ("OUTBOX_DIR", "INBOX_DIR", "ORPHAN_DIR"):
+    for name in ("OUTBOX_DIR", "INBOX_DIR", "ORPHAN_DIR", "PREFETCH_DIR"):
         target = tmp_path / name.lower()
         target.mkdir()
         monkeypatch.setattr(agent_module, name, target)
@@ -266,3 +266,46 @@ def test_agent_orphans_result_when_server_rejects(devices, tmp_path: Path, monke
     orphaned = list(agent_module.ORPHAN_DIR.iterdir())
     assert len(orphaned) == 1
     assert (orphaned[0] / "minutes.md").is_file()
+
+
+def test_offline_processing_keeps_result_for_later_upload(
+    devices, tmp_path: Path, monkeypatch
+) -> None:
+    settings, base_url, phone_id, phone_token, pc_id, pc_token = devices
+    completed = _seed_recording(base_url, phone_token, AUDIO_DATA)
+    job_id = completed["job_id"]
+    pipeline = _fake_pipeline_factory(tmp_path, AUDIO_DATA)
+    agent = _agent(tmp_path, monkeypatch, base_url, pc_id, pc_token, pipeline)
+    try:
+        assert agent.prefetch_jobs() == 1
+
+        original_upload = agent.client.upload_result
+
+        def offline_upload(*args, **kwargs):
+            from app.cloud.client import CloudError
+
+            raise CloudError("offline", status_code=0)
+
+        monkeypatch.setattr(agent.client, "upload_result", offline_upload)
+        assert agent.tick(force=True) == "processed"
+
+        # 本地已处理，结果留在 outbox；服务器任务仍是 queued，不消耗尝试次数
+        assert any(agent_module.OUTBOX_DIR.iterdir())
+        assert not any(agent_module.PREFETCH_DIR.iterdir())
+        notes = httpx.get(
+            f"{base_url}/api/v1/notes", headers=_auth(phone_token), timeout=10
+        ).json()
+        assert notes["total"] == 0
+        health = httpx.get(f"{base_url}/health", timeout=10).json()
+        assert health["queue"]["queued"] == 1
+
+        monkeypatch.setattr(agent.client, "upload_result", original_upload)
+        assert agent.flush_outbox() == 0
+        notes = httpx.get(
+            f"{base_url}/api/v1/notes", headers=_auth(phone_token), timeout=10
+        ).json()
+        assert notes["total"] == 1
+        assert notes["items"][0]["job_id"] == job_id
+        assert list(agent_module.OUTBOX_DIR.iterdir()) == []
+    finally:
+        agent.close()

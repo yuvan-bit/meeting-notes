@@ -8,13 +8,14 @@ from .. import config
 
 CLOUD_DIR = config.DATA_DIR / "cloud"
 INBOX_DIR = CLOUD_DIR / "inbox"
+PREFETCH_DIR = CLOUD_DIR / "prefetch"
 OUTBOX_DIR = CLOUD_DIR / "outbox"
 ORPHAN_DIR = CLOUD_DIR / "orphaned"
 AGENT_FILE = CLOUD_DIR / "agent.json"
 AGENT_LOCK = CLOUD_DIR / "agent.lock"
 LOG_FILE = CLOUD_DIR / "agent.log"
 
-for _dir in (CLOUD_DIR, INBOX_DIR, OUTBOX_DIR, ORPHAN_DIR):
+for _dir in (CLOUD_DIR, INBOX_DIR, PREFETCH_DIR, OUTBOX_DIR, ORPHAN_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -47,6 +48,7 @@ class AgentSettings:
     cpu_max_percent: float | None = 25.0
     gpu_max_util: float | None = 30.0
     heartbeat_seconds: int = 240
+    prefetch_limit: int = 2
     model: str = config.DEFAULT_LLM
     asr_device: str = config.ASR_DEVICE
 
@@ -60,6 +62,7 @@ class AgentSettings:
             cpu_max_percent=_env_optional_float("MEETING_AGENT_CPU_MAX", 25.0),
             gpu_max_util=_env_optional_float("MEETING_AGENT_GPU_MAX_UTIL", 30.0),
             heartbeat_seconds=max(30, int(os.environ.get("MEETING_AGENT_HEARTBEAT_SECONDS", "240"))),
+            prefetch_limit=max(1, min(5, int(os.environ.get("MEETING_AGENT_PREFETCH_LIMIT", "2")))),
             model=os.environ.get("MEETING_LLM", config.DEFAULT_LLM),
             asr_device=os.environ.get("MEETING_ASR_DEVICE", config.ASR_DEVICE),
         )
