@@ -160,7 +160,8 @@ Android 录音 ──分片上传──▶ FastAPI 控制面（SQLite + 文件�
 - `CloudClient.download_audio()` 改为 **1MB Range 分片下载**，每片最多重试 3 次，按 `Content-Range` 校验连续性，最后校验整文件 SHA-256；同样 6.5MB 音频从反复超时变为约 10 秒完成。
 - `app/cloud/ollama.py` 新增 `ensure_ollama()`：预取/转写前先检查 11434；不在时优先触发 `OllamaKeepAlive` 计划任务，再尝试直接启动。
 - `tools/install_agent_task.ps1` 现在同时安装：
-  - `MeetingNotesCloudAgent`：每 2 分钟检查队列；
+  - `MeetingNotesCloudAgent`：30 分钟兜底检查队列；
+  - `MeetingNotesNotifyListener`：登录后常驻，等待服务器推送；
   - `OllamaKeepAlive`：每 5 分钟检查并拉起 Ollama。
 - `tools/ollama-keepalive.vbs` 是保活脚本源文件，安装时复制到 `%LOCALAPPDATA%\MeetingNotes\ollama-keepalive.vbs`；计划任务用 `wscript.exe //B //Nologo` 运行，**不要改回 .cmd**，否则每 5 分钟会闪一次 cmd 窗口。
 - `server/tests/test_cloud_agent.py` 已把 Ollama 检查替换为 mock，测试不再依赖本机 Ollama。
@@ -171,7 +172,7 @@ Android 录音 ──分片上传──▶ FastAPI 控制面（SQLite + 文件�
 
 代理流程已从「联网领取→立刻下载→立刻转写→立刻上传」改为三段解耦：
 
-1. **联网预取**：每 2 分钟调用 `GET /api/v1/agent/jobs/queued` 查看排队任务，把音频下载到 `data/cloud/prefetch/<job_id>/`，默认最多保留 2 个；预取不占服务器租约，任务在服务器仍保持 `queued`。
+1. **联网预取**：收到服务器推送（或 30 分钟兜底 tick）时调用 `GET /api/v1/agent/jobs/queued` 查看排队任务，把音频下载到 `data/cloud/prefetch/<job_id>/`，默认最多保留 2 个；预取不占服务器租约，任务在服务器仍保持 `queued`。
 2. **空闲转写**：本地队列存在时，仍按空闲 10 分钟、接电源、CPU/GPU 低负载的条件启动 FunASR + Ollama；断网也能转写。结果写入 `data/cloud/outbox/<job_id>/`。
 3. **联网回传**：每次 tick 先 `flush_outbox`；服务器允许 PC 对 `queued` 任务直接回传结果（不消耗尝试次数），上传成功即置 `done`。断网时结果留在 outbox，恢复后自动重试。
 
@@ -183,6 +184,17 @@ Android 录音 ──分片上传──▶ FastAPI 控制面（SQLite + 文件�
 - `server/routers/agent.py`：新增 `GET /agent/jobs/queued`；`POST /agent/jobs/{id}/result` 允许 `queued` 任务直接接收结果；过期租约在预取列表前回收。
 - 本地失败的任务最多重试 3 次，之后移入 `data/cloud/orphaned/`，避免无限占用 GPU；服务器任务仍保留在队列，可人工处理。
 - 当前按**单 PC 代理**设计：预取不占租约，多个 PC 同时预取同一任务会重复计算；回传按 job_id 幂等，但不要同时运行多个代理实例。
+
+### 5.7 服务器推送通知（2026-10-28）
+
+为了避免电脑每 2 分钟查询一次队列，新增服务器到电脑的推送：
+
+- 服务端 `GET /api/v1/agent/notifications?since=<version>&wait=300` 保持一条长连接；手机上传完成、生成 job 后调用 `server/notify.py` 的 `bump()` 唤醒等待中的 PC。版本号使用纳秒时间戳，服务器重启后 PC 重连也能立即收到变化。
+- PC 端 `app/notify_listener.py` 登录后常驻，保持一条长连接；收到变化后触发一次 `pythonw -m app.cloud_agent run --once`。监听器约 28MB，无 GPU、无控制台窗口，**不轮询任务队列**。
+- 计划任务新增 `MeetingNotesNotifyListener`（登录启动）；`MeetingNotesCloudAgent` 从每 2 分钟改为 **30 分钟兜底**。推送丢失、监听器重启或服务器重启时，兜底任务仍会补上。
+- PC 不需要开放入站端口，也不需要 Windows 防火墙规则；长连接由 PC 主动建立，服务器有新音频时立即回复，效果等同服务器通知。
+- 相关文件：`server/notify.py`、`server/routers/agent.py`、`server/routers/recordings.py`、`app/notify_listener.py`、`tools/install_agent_task.ps1`、`server/tests/test_agent_prefetch.py`。
+- 监听器每 5 分钟会因长连接超时重连一次，这是空闲等待，不是任务队列轮询；实际任务查询只在收到通知或 30 分钟兜底时发生。
 
 ## 6. 常用命令
 
@@ -196,7 +208,7 @@ Android 录音 ──分片上传──▶ FastAPI 控制面（SQLite + 文件�
 .venv\Scripts\python.exe -m pytest tests -q
 ```
 
-最近一次结果：服务端 31 项通过，PC 端 6 项通过。
+最近一次结果：服务端 36 项通过，PC 端 5 项通过、1 项跳过。
 
 ### 本机
 
@@ -274,11 +286,15 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
    - `server/tests/test_cloud_agent.py`
    - `tools/install_agent_task.ps1`、`tools/ollama-keepalive.vbs`
    - `HANDOFF.md`（本次故障与修复）
-
 6. **`feat(agent): prefetch audio and process offline`**
    - `app/cloud/agent.py`、`app/cloud/client.py`、`app/cloud/config.py`
    - `server/routers/agent.py`、`server/tests/test_agent_prefetch.py`、`server/tests/test_cloud_agent.py`
    - `README.md`、`docs/cloud-architecture.md`、`HANDOFF.md`
+7. **`feat(agent): push new-audio notifications to the PC`**
+   - `server/notify.py`、`server/routers/agent.py`、`server/routers/recordings.py`
+   - `app/notify_listener.py`
+   - `tools/install_agent_task.ps1`
+   - `server/tests/test_agent_prefetch.py`、`README.md`、`docs/cloud-architecture.md`、`HANDOFF.md`
 
 **不要提交**：
 
@@ -292,7 +308,7 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
    - 笔记列表 / 详情第二次打开是秒显；
    - 断网或 Tailscale 未连时仍能看到缓存，详情页会显示「上次缓存」提示；
    - 上传通知栏显示进度，短录音能很快完成。
-3. 队列中的 26 分钟录音已处理完成（notes=5，队列为空）；下次手机上传后确认「联网预取 → 空闲转写 → 联网回传」全流程，并观察断网时是否继续使用本地队列。
+3. 队列中的 26 分钟录音已处理完成（notes=5，队列为空）；下次手机上传后确认「服务器推送 → 联网预取 → 空闲转写 → 联网回传」全流程，并观察断网时是否继续使用本地队列。
 4. `promo/` 已加入 `.gitignore`；如需长期归档，发布到 GitHub Release 或移出仓库。
 5. 视情况在手机上把 Tailscale 设为「始终开启 VPN」并关闭其电池优化，减少隧道断开。
 
@@ -306,6 +322,8 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 - **应用更新**：Android 必须继续使用现有稳定签名；发布前核对 `versionCode` 严格递增。
 - **资源限制**：服务器 2C2G，`meeting-notes.service` 内存上限 300MB；线上分片大小 1MB（`MEETING_CHUNK_MB=1`）。不要随意加大并发或分片，先看内存和磁盘。
 - **Ollama 保活**：不要删除 `OllamaKeepAlive` 计划任务。摘要依赖本机 Ollama；代理转写前会检查，缺失时保留本地队列而不是把任务打成 failed。
+- **通知监听**：`MeetingNotesNotifyListener` 是登录常驻的长连接监听（约 28MB、无 GPU）。它不轮询任务队列；不要改成每几秒查询。`MeetingNotesCloudAgent` 的 30 分钟任务只是兜底，不要改回 2 分钟。
+- **推送语义**：服务器在 `complete_recording` 生成 job 后调用 `bump()`；监听器触发一次代理，代理仍按预取/空闲/回传流程工作。PC 没有开放入站端口。
 - **单 PC 代理**：预取不占服务器租约，当前只应运行一个 PC 代理实例。不要在多台机器同时启用预取，否则会重复下载和计算；结果回传按 job_id 幂等，但不会自动去重计算。
 - **离线结果**：服务端允许 PC 对 `queued` 任务直接回传结果，不消耗 attempts；这是离线转写的关键路径，不要收紧成必须持有租约。
 - **服务器版本号**：服务端健康检查的 `version` 仍是 `0.1.0`，属于历史配置；排查时不要拿它和 Android 版本混淆。
@@ -319,6 +337,7 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 [ ] /api/v1/app/latest 返回 version_code=4 / 0.2.2
 [ ] 手机安装 0.2.2 后能打开笔记，且二次打开秒显
 [ ] 新录一段 1 分钟音频，通知栏出现上传进度并很快完成
+[ ] 手机上传完成后，PC 的 `notify.log` 立即出现「收到服务器新音频通知」，随后 agent.log 出现「已预取音频」
 [ ] 联网时 `data/cloud/prefetch/` 出现任务；断网后仍能完成转写并写入 outbox；恢复联网后自动上传
 [ ] PC 空闲满 10 分钟后，agent.log 出现「开始本地转写」而不是旧的「领取任务」
 [x] 安全组放行后 tailscale ping 显示 direct（PC/手机均为 53ms 左右）

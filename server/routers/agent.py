@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import mimetypes
 import shutil
@@ -14,6 +15,7 @@ from starlette.datastructures import UploadFile
 from ..config import Settings
 from ..deps import get_db, get_settings, require_pc
 from ..schemas import FailRequest
+from .. import notify
 from ..storage import (
     RESULT_FILE_NAMES,
     extract_summary,
@@ -163,6 +165,19 @@ def queued_jobs(
             for row in rows
         ]
     }
+
+
+@router.get("/notifications")
+async def notifications(
+    since: int = Query(default=0, ge=0),
+    wait: int = Query(default=300, ge=0, le=300),
+    device: dict = Depends(require_pc),
+):
+    version = notify.current_version()
+    if wait and version <= since:
+        await asyncio.to_thread(notify.wait_for_change, since, float(wait))
+        version = notify.current_version()
+    return {"version": version, "changed": version > since}
 
 
 @router.post("/jobs/{job_id}/heartbeat")

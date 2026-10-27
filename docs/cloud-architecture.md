@@ -26,7 +26,9 @@ Android App
   FastAPI + SQLite(WAL) + 音频仓库 + 笔记仓库
         ▲ 任务租约/心跳/结果回传
         │
-PC 空闲代理（计划任务，每 2 分钟检查一次）
+PC 通知监听（登录常驻，一条长连接等待服务器推送）
+  服务器新音频 → 立即触发
+PC 空闲代理（30 分钟兜底检查）
   联网预取音频 → 本地队列 → 空闲检测 → 现有 FunASR/Ollama pipeline
   → 本地归档 + outbox → 联网时回传结果
 ```
@@ -66,7 +68,7 @@ Restart=always
 
 ### PC 代理
 
-- 由 Windows 计划任务每 2 分钟执行一次 `python -m app.cloud_agent run --once`，不常驻内存。
+- 由 Windows 计划任务每 30 分钟执行一次 `python -m app.cloud_agent run --once` 作为兜底；登录后另有 `app.notify_listener` 常驻，保持一条 `/api/v1/agent/notifications` 长连接。服务器收到新音频后通过长连接立即唤醒 PC，不要求 PC 高频轮询。
 - 复用 `app.pipeline.run_pipeline`；与本地 UI 共用处理锁，避免同时抢 GPU。
 - 空闲判定：用户无输入 ≥10 分钟、CPU ≤25%、GPU ≤30%（检测可用时）、接通电源、无本地任务。
 - 任务开始后阻止系统睡眠；完成/失败后释放。

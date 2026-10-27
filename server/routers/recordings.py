@@ -15,6 +15,7 @@ from ..deps import get_db, get_settings, require_device, require_phone
 from ..schemas import RecordingCreate
 from ..storage import audio_rel_path, audio_suffix, remove_tree
 from ..utils import iso, new_id, parse_iso
+from .. import notify
 from .common import get_recording, get_job, serialize_recording
 
 router = APIRouter(tags=["recordings"])
@@ -297,6 +298,7 @@ def complete_recording(
             (new_id("evt"), job_id, "音频上传完成", now),
         )
     remove_tree(settings.tmp_dir / recording_id)
+    notify.bump()
     return {
         "recording_id": recording_id,
         "job_id": job_id,

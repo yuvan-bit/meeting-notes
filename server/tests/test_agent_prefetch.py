@@ -66,3 +66,65 @@ def test_queued_job_accepts_offline_result_without_claim(
         conn.close()
     assert row["status"] == "done"
     assert row["attempts"] == 0
+
+
+def test_new_recording_bumps_notification(client: TestClient, settings: Settings) -> None:
+    from server import notify
+
+    phone = pair(client, settings, "phone")
+    pc = pair(client, settings, "pc", "书桌电脑")
+    before = notify.current_version()
+
+    data = b"notification audio"
+    recording = create_recording(client, phone["token"], data)
+    upload_all_chunks(client, phone["token"], recording, data)
+    complete(client, phone["token"], recording["recording_id"])
+
+    response = client.get(
+        "/api/v1/agent/notifications",
+        params={"since": before, "wait": 0},
+        headers=auth(pc["token"]),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["changed"] is True
+    assert body["version"] > before
+
+    current = body["version"]
+    quiet = client.get(
+        "/api/v1/agent/notifications",
+        params={"since": current, "wait": 0},
+        headers=auth(pc["token"]),
+    )
+    assert quiet.status_code == 200
+    assert quiet.json()["changed"] is False
+
+
+def test_notification_long_poll_wakes_on_bump(
+    client: TestClient, settings: Settings
+) -> None:
+    import threading
+    import time
+
+    from server import notify
+
+    pc = pair(client, settings, "pc", "书桌电脑")
+    since = notify.current_version()
+    result: dict = {}
+
+    def wait_for_notification() -> None:
+        result["response"] = client.get(
+            "/api/v1/agent/notifications",
+            params={"since": since, "wait": 3},
+            headers=auth(pc["token"]),
+        )
+
+    thread = threading.Thread(target=wait_for_notification)
+    thread.start()
+    time.sleep(0.3)
+    notify.bump()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    response = result["response"]
+    assert response.status_code == 200
+    assert response.json()["changed"] is True

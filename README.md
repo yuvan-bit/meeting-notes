@@ -13,7 +13,7 @@
 - **本机工作台**：Gradio 界面浏览资料库、上传处理、查看进度。
 - **托盘客户端**：常驻内存约 40MB；关闭工作台窗口即释放 WebUI 与浏览器窗口，再次启动只重开窗口。
 - **安卓 App**：录音/暂停/续录、前台上传与并发分片断点续传、笔记本地缓存秒开、笔记列表与搜索、Markdown 预览、附件下载、应用内检查更新。
-- **空闲代理**：Windows 计划任务每 2 分钟检查一次；联网时预取未转写音频到本地队列（默认最多 2 个），空闲满 10 分钟、接电源、CPU/GPU 低负载时离线转写，联网后自动回传。断网期间仍可继续使用已预取的音频。
+- **空闲代理**：服务器有新音频时通过长连接立即通知电脑；电脑常驻一个轻量监听（约 28MB，无 GPU），联网时预取未转写音频到本地队列（默认最多 2 个），空闲满 10 分钟、接电源、CPU/GPU 低负载时离线转写，联网后自动回传。另有 30 分钟兜底检查，断网期间仍可继续使用已预取的音频。
 - **保留策略**：服务器音频最多 5GB、最多 30 天；笔记和转写稿永久保留，置顶记录不自动清理。
 
 ## 架构
@@ -147,7 +147,13 @@ sudo -u meeting .venv/bin/python -m server.cli pair-code --role pc
 powershell -ExecutionPolicy Bypass -File tools\install_agent_task.ps1
 ```
 
-计划任务每 2 分钟执行一次 `app.cloud_agent run --once`，不常驻进程。卸载任务：
+安装脚本会注册三个计划任务：
+
+- `MeetingNotesCloudAgent`：每 30 分钟兜底执行一次 `app.cloud_agent run --once`；
+- `MeetingNotesNotifyListener`：登录后常驻，保持一条服务器长连接；服务器收到新音频时立即回复并触发代理，电脑不再每 2 分钟查询队列；
+- `OllamaKeepAlive`：每 5 分钟检查 Ollama，缺失时自动拉起。
+
+卸载任务：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\install_agent_task.ps1 -Uninstall
