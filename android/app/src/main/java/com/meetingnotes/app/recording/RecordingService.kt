@@ -1,10 +1,12 @@
 package com.meetingnotes.app.recording
 
+import android.Manifest
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.MediaRecorder
 import android.os.Build
@@ -16,6 +18,7 @@ import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.meetingnotes.app.MainActivity
 import com.meetingnotes.app.MeetingApp
 import com.meetingnotes.app.Notifications
@@ -250,7 +253,7 @@ class RecordingService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val notification = buildNotification(title, "00:00:00", openApp, stop)
-        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         } else {
             0
@@ -259,6 +262,12 @@ class RecordingService : Service() {
     }
 
     private fun updateNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
         val openApp = PendingIntent.getActivity(
             this,
             1,

@@ -1,10 +1,14 @@
 package com.meetingnotes.app
 
+import android.Manifest
 import android.app.Application
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.meetingnotes.app.data.ApiClient
 import com.meetingnotes.app.data.NoteCache
 import com.meetingnotes.app.data.RecordingStore
@@ -56,6 +60,12 @@ object Notifications {
     }
 
     fun uploadStatus(context: Context, title: String, text: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
         val notification = NotificationCompat.Builder(context, CHANNEL_UPLOAD)
             .setSmallIcon(R.drawable.ic_mic)
             .setContentTitle(title)

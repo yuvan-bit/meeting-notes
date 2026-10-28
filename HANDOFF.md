@@ -212,6 +212,26 @@ Android 录音 ──分片上传──▶ FastAPI 控制面（SQLite + 文件�
 - 当前服务器队列 **5**、本地预取 **5**（总时长约 8 小时 14 分，约 120MB）。其中 3 个是 10-27 因 ffprobe 失败、已重新排队的任务；另外 2 个是 10-28 的排队任务。全量拉取绕过了默认 `prefetch_limit=2`；后续自动预取仍保留 2 个的限额。两段时长接近（约 1 小时 40 分）的音频按服务器队列原样保留，未自行去重。
 - **不要删除 `data/tools/ffmpeg/`**；如果以后升级 ffmpeg，保持 `ffmpeg.exe`、`ffprobe.exe` 在该目录或系统 PATH。
 
+### 5.9 全量测试与环境修复（2026-10-29）
+
+全量回归时发现项目 `.venv` 的基础 Python 已被破坏：`C:\Users\asus\AppData\Local\Python\pythoncore-3.11-64` 只剩 DLL 和 pythonw，缺少 `python.exe` 与 `Lib`，所有 `python`/`pythonw` 启动都会失败，计划任务的代理也受影响。
+
+处理：
+
+- 安装 Python 3.11.9 到 `C:\Users\asus\AppData\Local\Programs\Python\Python311`。
+- 更新 `.venv/pyvenv.cfg` 的 `home`/`executable` 指向新安装；原文件备份为 `.venv/pyvenv.cfg.bak-20261028`。
+- 验证 `venv` 可导入 `httpx`、`torch`，`cloud_agent status` 正常；计划任务运行结果 `LastTaskResult=0`。
+- 若 `.venv` 需要重建，使用 Python 3.11.9 x64，并保留现有 `data/cloud/agent.json` 配对信息。
+
+测试结果：
+
+- 服务端 `pytest server/tests -q`：**36 passed**。
+- PC 端 `pytest tests -q`：**6 passed**。
+- Android `assembleRelease` + `testReleaseUnitTest`：**BUILD SUCCESSFUL**；APK 0.2.2 / versionCode 4，签名证书一致。
+- Android `lintRelease`：修复 2 个 `MissingPermission` 错误（通知权限检查）和 API 30 前台服务类型守卫后 **0 errors, 4 warnings**；Android 版本号未变，本次 lint 修复未重新发布 APK。
+- 线上只读冒烟：`/health` queue 5 / notes 5；queued API 5；通知长连接 2 秒等待正常；Tailscale 直连 66ms。
+- 当前 5 个本地预取任务仍在等电脑空闲处理，测试没有触发转写，也没有改动业务数据。
+
 ## 6. 常用命令
 
 ### 测试
@@ -314,6 +334,9 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 8. **`fix(agent): require ffmpeg and recover orphaned audio`**
    - `app/config.py`、`app/cloud/agent.py`
    - `README.md`、`HANDOFF.md`
+9. **`fix(android): guard revocable notification permission`**
+   - `android/.../MeetingApp.kt`、`android/.../recording/RecordingService.kt`
+   - `HANDOFF.md`（全量测试记录）
 
 **不要提交**：
 
@@ -347,6 +370,7 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 - **单 PC 代理**：预取不占服务器租约，当前只应运行一个 PC 代理实例。不要在多台机器同时启用预取，否则会重复下载和计算；结果回传按 job_id 幂等，但不会自动去重计算。
 - **离线结果**：服务端允许 PC 对 `queued` 任务直接回传结果，不消耗 attempts；这是离线转写的关键路径，不要收紧成必须持有租约。
 - **媒体工具**：ffmpeg 与 ffprobe 是转写前置依赖。当前放在 `data/tools/ffmpeg/bin`，`app/config.py` 会自动加入 PATH；不要只依赖系统 PATH。缺少时 `process_local_job` 会保留本地音频、不计失败次数。
+- **Python 运行时**：`.venv` 依赖 `C:\Users\asus\AppData\Local\Programs\Python\Python311\python.exe`（3.11.9）。不要删除；如果 `.venv` 重建，recreate 后要保留 `data/cloud/agent.json` 配对文件。旧 base `pythoncore-3.11-64` 已损坏，`pyvenv.cfg` 已改指向新安装。
 - **服务器版本号**：服务端健康检查的 `version` 仍是 `0.1.0`，属于历史配置；排查时不要拿它和 Android 版本混淆。
 
 ## 10. 快速验收清单
@@ -355,6 +379,8 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 [ ] /health 返回 ok=true，notes 数量符合预期
 [x] 长音频任务在 Ollama 和 ffmpeg/ffprobe 可用时能完成下载、转写和摘要；队列清空
 [x] 缺少 ffmpeg/ffprobe 时本地任务保留在 prefetch，不会因连续失败被移入 orphan
+[x] Android `assembleRelease`、`testReleaseUnitTest` 通过；`lintRelease` 0 errors（4 warnings）
+[x] 服务端 36 项、PC 端 6 项测试通过
 [ ] 当前 5 个已预取长录音在电脑空闲后依次完成并回传（总约 8 小时 14 分音频）
 [x] OllamaKeepAlive 任务每 5 分钟检查，Ollama 停止后能自动拉起
 [ ] /api/v1/app/latest 返回 version_code=4 / 0.2.2
