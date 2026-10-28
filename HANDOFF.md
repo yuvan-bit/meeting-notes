@@ -35,7 +35,7 @@
 
 ### 安卓发布
 
-- 已发布：**0.2.2（versionCode 4）**，12MB，签名证书 `CN=Meeting Notes`。
+- 已发布：**0.2.3（versionCode 5）**，12MB，签名证书 `CN=Meeting Notes`。
 - 发布方式：服务器 `server.cli publish-apk`，客户端通过 `/api/v1/app/latest` 检查更新。
 - 手机升级路径：App →「设置」→「应用更新」。
 - 本地构建产物：`android/app/build/outputs/apk/release/app-release.apk`（被 `.gitignore` 忽略，不要提交）。
@@ -227,8 +227,8 @@ Android 录音 ──分片上传──▶ FastAPI 控制面（SQLite + 文件�
 
 - 服务端 `pytest server/tests -q`：**36 passed**。
 - PC 端 `pytest tests -q`：**6 passed**。
-- Android `assembleRelease` + `testReleaseUnitTest`：**BUILD SUCCESSFUL**；APK 0.2.2 / versionCode 4，签名证书一致。
-- Android `lintRelease`：修复 2 个 `MissingPermission` 错误（通知权限检查）和 API 30 前台服务类型守卫后 **0 errors, 4 warnings**；Android 版本号未变，本次 lint 修复未重新发布 APK。
+- Android `assembleRelease` + `testReleaseUnitTest`：**BUILD SUCCESSFUL**；APK 0.2.3 / versionCode 5，签名证书一致。
+- Android `lintRelease`：修复 2 个 `MissingPermission` 错误（通知权限检查）和 API 30 前台服务类型守卫后 **0 errors, 4 warnings**；已作为 **0.2.3 / versionCode 5** 发布（SHA-256 `d323a9fa…`）。
 - 线上只读冒烟：`/health` queue 5 / notes 5；queued API 5；通知长连接 2 秒等待正常；Tailscale 直连 66ms。
 - 当前 5 个本地预取任务仍在等电脑空闲处理，测试没有触发转写，也没有改动业务数据。
 
@@ -337,6 +337,9 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 9. **`fix(android): guard revocable notification permission`**
    - `android/.../MeetingApp.kt`、`android/.../recording/RecordingService.kt`
    - `HANDOFF.md`（全量测试记录）
+10. **`release: Android 0.2.3`**
+    - `android/app/build.gradle.kts`（versionCode 5 / 0.2.3）
+    - `HANDOFF.md`
 
 **不要提交**：
 
@@ -346,7 +349,7 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 ## 8. 待办与下一步
 
 1. **直连已完成**（UDP 41641，PC/手机均 direct）；下次手机上传时确认实际分片速率，并继续观察隧道是否保持在 direct。
-2. 在手机上安装 0.2.2，确认：
+2. 在手机上安装 0.2.3，确认：
    - 笔记列表 / 详情第二次打开是秒显；
    - 断网或 Tailscale 未连时仍能看到缓存，详情页会显示「上次缓存」提示；
    - 上传通知栏显示进度，短录音能很快完成。
@@ -383,8 +386,8 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 [x] 服务端 36 项、PC 端 6 项测试通过
 [ ] 当前 5 个已预取长录音在电脑空闲后依次完成并回传（总约 8 小时 14 分音频）
 [x] OllamaKeepAlive 任务每 5 分钟检查，Ollama 停止后能自动拉起
-[ ] /api/v1/app/latest 返回 version_code=4 / 0.2.2
-[ ] 手机安装 0.2.2 后能打开笔记，且二次打开秒显
+[ ] /api/v1/app/latest 返回 version_code=5 / 0.2.3
+[ ] 手机安装 0.2.3 后能打开笔记，且二次打开秒显
 [ ] 新录一段 1 分钟音频，通知栏出现上传进度并很快完成
 [ ] 手机上传完成后，PC 的 `notify.log` 立即出现「收到服务器新音频通知」，随后 agent.log 出现「已预取音频」
 [ ] 联网时 `data/cloud/prefetch/` 出现任务；断网后仍能完成转写并写入 outbox；恢复联网后自动上传
