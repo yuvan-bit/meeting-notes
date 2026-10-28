@@ -196,6 +196,22 @@ Android 录音 ──分片上传──▶ FastAPI 控制面（SQLite + 文件�
 - 相关文件：`server/notify.py`、`server/routers/agent.py`、`server/routers/recordings.py`、`app/notify_listener.py`、`tools/install_agent_task.ps1`、`server/tests/test_agent_prefetch.py`。
 - 监听器每 5 分钟会因长连接超时重连一次，这是空闲等待，不是任务队列轮询；实际任务查询只在收到通知或 30 分钟兜底时发生。
 
+### 5.8 ffmpeg/ffprobe 缺失与队列恢复（2026-10-28）
+
+19:00–21:00 的现象不是代理没运行：
+
+- 18:02–20:58 外网中断，预取和监听日志都是 `SSL: UNEXPECTED_EOF_WHILE_READING`；但一个约 27MB、1 小时 51 分的录音已经在断网前预取到本地。
+- 19:02:50 和 19:32:48 代理两次尝试本地转写，都因为 **`找不到 ffprobe`** 立即失败；第三次失败后任务被移入 `data/cloud/orphaned/`，所以 20:02、20:32 的兜底轮次显示「本地没有待转写音频」。
+- 20:58 网络恢复，监听器收到新通知；21:03 又预取了一个约 24MB、1 小时 40 分的录音。
+
+修复：
+
+- 把 ffmpeg 9.0.2 的 `ffmpeg.exe` 和 `ffprobe.exe` 放到 `data/tools/ffmpeg/bin/`；`app/config.py` 会把它自动前置到 `PATH`，不再依赖计划任务的系统 PATH。
+- `process_local_job` 增加媒体工具预检：缺少 ffmpeg/ffprobe 时只记录警告并**保留本地音频**，不消耗失败次数，也不把任务移入 orphan。
+- 已把 27MB 的 orphan 任务移回 `data/cloud/prefetch/`，重置 failures=0，并用 ffprobe 验证可读。
+- 当前本地预取队列有两个大任务（约 1 小时 51 分和 1 小时 40 分），服务器队列 2；电脑空闲满 10 分钟或下一次兜底时会依次处理。
+- **不要删除 `data/tools/ffmpeg/`**；如果以后升级 ffmpeg，保持 `ffmpeg.exe`、`ffprobe.exe` 在该目录或系统 PATH。
+
 ## 6. 常用命令
 
 ### 测试
@@ -295,6 +311,9 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
    - `app/notify_listener.py`
    - `tools/install_agent_task.ps1`
    - `server/tests/test_agent_prefetch.py`、`README.md`、`docs/cloud-architecture.md`、`HANDOFF.md`
+8. **`fix(agent): require ffmpeg and recover orphaned audio`**
+   - `app/config.py`、`app/cloud/agent.py`
+   - `README.md`、`HANDOFF.md`
 
 **不要提交**：
 
@@ -308,9 +327,10 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
    - 笔记列表 / 详情第二次打开是秒显；
    - 断网或 Tailscale 未连时仍能看到缓存，详情页会显示「上次缓存」提示；
    - 上传通知栏显示进度，短录音能很快完成。
-3. 队列中的 26 分钟录音已处理完成（notes=5，队列为空）；下次手机上传后确认「服务器推送 → 联网预取 → 空闲转写 → 联网回传」全流程，并观察断网时是否继续使用本地队列。
+3. 当前服务器队列有 2 个任务（约 1 小时 51 分和 1 小时 40 分），都已预取到本地；等电脑空闲后依次处理，确认能从本地转写到 queued 回传。
 4. `promo/` 已加入 `.gitignore`；如需长期归档，发布到 GitHub Release 或移出仓库。
 5. 视情况在手机上把 Tailscale 设为「始终开启 VPN」并关闭其电池优化，减少隧道断开。
+6. 保留 `data/tools/ffmpeg/bin`（ffmpeg/ffprobe）；如果系统升级或清理，先确认这两个程序仍在，否则代理会暂不转写并保留队列。
 
 ## 9. 约束与安全注意事项
 
@@ -326,13 +346,16 @@ sudo -u meeting env MEETING_DATA_DIR=/var/lib/meeting-notes \
 - **推送语义**：服务器在 `complete_recording` 生成 job 后调用 `bump()`；监听器触发一次代理，代理仍按预取/空闲/回传流程工作。PC 没有开放入站端口。
 - **单 PC 代理**：预取不占服务器租约，当前只应运行一个 PC 代理实例。不要在多台机器同时启用预取，否则会重复下载和计算；结果回传按 job_id 幂等，但不会自动去重计算。
 - **离线结果**：服务端允许 PC 对 `queued` 任务直接回传结果，不消耗 attempts；这是离线转写的关键路径，不要收紧成必须持有租约。
+- **媒体工具**：ffmpeg 与 ffprobe 是转写前置依赖。当前放在 `data/tools/ffmpeg/bin`，`app/config.py` 会自动加入 PATH；不要只依赖系统 PATH。缺少时 `process_local_job` 会保留本地音频、不计失败次数。
 - **服务器版本号**：服务端健康检查的 `version` 仍是 `0.1.0`，属于历史配置；排查时不要拿它和 Android 版本混淆。
 
 ## 10. 快速验收清单
 
 ```text
 [ ] /health 返回 ok=true，notes 数量符合预期
-[x] 长音频任务在 Ollama 运行时能完成分片下载、转写和摘要；队列清空
+[x] 长音频任务在 Ollama 和 ffmpeg/ffprobe 可用时能完成下载、转写和摘要；队列清空
+[x] 缺少 ffmpeg/ffprobe 时本地任务保留在 prefetch，不会因连续失败被移入 orphan
+[ ] 当前两个已预取长录音在电脑空闲后依次完成并回传
 [x] OllamaKeepAlive 任务每 5 分钟检查，Ollama 停止后能自动拉起
 [ ] /api/v1/app/latest 返回 version_code=4 / 0.2.2
 [ ] 手机安装 0.2.2 后能打开笔记，且二次打开秒显

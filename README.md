@@ -50,7 +50,7 @@ assets/             图标
 
 - Windows 10/11（托盘与应用窗口逻辑仅适配 Windows）
 - Python 3.11（64 位）
-- [ffmpeg](https://ffmpeg.org/) 已加入 `PATH`
+- [ffmpeg](https://ffmpeg.org/) 与 ffprobe 已加入 `PATH`，或放到 `data/tools/ffmpeg/bin`（应用会自动加入 `PATH`）
 - [Ollama](https://ollama.com/)，默认模型 `qwen3.5:9b` 和 `qwen3.5:4b`
 - 可选 NVIDIA GPU；CPU 也能跑，但速度较慢
 

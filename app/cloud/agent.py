@@ -324,6 +324,16 @@ class CloudAgent:
         if not isinstance(recording, dict):
             recording = {}
         audio = folder / str(manifest.get("audio_file") or "")
+        missing_tools = [
+            name for name in ("ffmpeg", "ffprobe") if shutil.which(name) is None
+        ]
+        if missing_tools:
+            logger.warning(
+                "缺少 %s，暂不转写，保留本地音频：%s",
+                "、".join(missing_tools),
+                job_id,
+            )
+            return
         logger.info(
             "开始本地转写 job=%s 标题=%s 大小=%s 时长=%s",
             job_id,

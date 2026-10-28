@@ -14,6 +14,15 @@ MODEL_DIR = BASE_DIR / "models"
 for _dir in (OUTPUT_DIR, WORK_DIR, SAMPLE_DIR, LIBRARY_DIR, MODEL_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
 
+# 便携/本地安装的 ffmpeg 优先于系统 PATH；计划任务和 WebUI 都能找到
+_tool_dirs = [DATA_DIR / "tools" / "ffmpeg" / "bin", BASE_DIR / "tools" / "ffmpeg" / "bin"]
+_local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+if _local_appdata:
+    _tool_dirs.append(Path(_local_appdata) / "Microsoft" / "WinGet" / "Links")
+for _tool_dir in _tool_dirs:
+    if _tool_dir.is_dir():
+        os.environ["PATH"] = str(_tool_dir) + os.pathsep + os.environ.get("PATH", "")
+
 # 模型缓存全部留在项目目录，避免污染用户主目录
 os.environ.setdefault("MODELSCOPE_CACHE", str(MODEL_DIR / "modelscope"))
 os.environ.setdefault("MODELSCOPE_CACHE_HOME", str(MODEL_DIR / "modelscope"))
